@@ -39,7 +39,7 @@ biocViews: Software, DataImport, BiomedicalInformatics, Pharmacogenomics, Pharma
 Encoding: UTF-8
 ByteCompile: true
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
+RoxygenNote: 7.3.3
 Config/testthat/edition: 3
 Config/testthat/parallel: true
 VignetteBuilder: knitr
@@ -76,3 +76,4 @@ Collate:
     'utils-file.R'
     'utils-str.R'
     'utils.R'
+    'zzz.R'
