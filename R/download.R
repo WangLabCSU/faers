@@ -40,6 +40,7 @@ faers_download <- function(years, quarters, format = NULL, dir = getwd(), ...) {
 #' @return A character path if downloading successed, otherwise, stop with error
 #'   message.
 #' @noRd
+faers_file_format <- c("ascii", "xml")
 download_inform <- function(urls, file_paths, ...) {
     out <- file_paths
     if (any(is_existed <- file.exists(file_paths))) {
