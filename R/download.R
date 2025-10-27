@@ -19,8 +19,8 @@
 #' )
 #' @export
 faers_download <- function(years, quarters, format = NULL, dir = getwd(), ...) {
-    format <- match.arg(format, faers_file_format)
-    assert_string(dir, empty_ok = FALSE)
+    format <- match.arg(format, FAERS_FILE_FORMAT)
+    assert_string(dir, allow_empty = FALSE)
     if (format == "xml") {
         # only faers database has xml data files
         is_aers_pairs <- is_from_laers(years, quarters)
@@ -36,13 +36,13 @@ faers_download <- function(years, quarters, format = NULL, dir = getwd(), ...) {
     dest_files <- file.path(dir_create2(dir), basename(urls))
     download_inform(urls, dest_files, ...)
 }
+
 #' Download utils function with good message.
 #' @return A character path if downloading successed, otherwise, stop with error
 #'   message.
 #' @noRd
-faers_file_format <- c("ascii", "xml")
 download_inform <- function(urls, file_paths, ...) {
-    out <- file_paths
+    ans <- file_paths
     if (any(is_existed <- file.exists(file_paths))) {
         cli::cli_inform(paste(
             "Finding {.val {sum(is_existed)}} file{?s} already",
@@ -59,32 +59,46 @@ download_inform <- function(urls, file_paths, ...) {
             cli::cli_inform("Downloading {.val {l}} files")
         }
         
-        old_timeout <- getOption("timeout")
-        options(timeout = 300) 
+        headers <- get_complete_headers()
         
-        status <- utils::download.file(urls,
-                                       destfile = file_paths, ...,
-                                       method = "libcurl"
+        arg_list <- c(
+            list(
+                urls = urls, destfiles = file_paths, resume = FALSE,
+                progress = interactive(), multi_timeout = Inf
+            ),
+            list(
+                useragent = headers$`User-Agent`,
+                httpheader = c(
+                    Accept = headers$Accept,
+                    `Accept-Language` = headers$`Accept-Language`,
+                    `Accept-Encoding` = headers$`Accept-Encoding`,
+                    Connection = headers$Connection,
+                    Referer = headers$Referer
+                )
+            ),
+            rlang::list2(...)
         )
-        
-        options(timeout = old_timeout)
-        
-        is_success <- status == 0L
+        status <- do.call(curl::multi_download, arg_list)
+        is_success <- is_download_success(status)
         is_need_deleted <- !is_success & file.exists(file_paths)
         if (any(is_need_deleted)) file.remove(file_paths[is_need_deleted])
         if (!all(is_success)) {
-            n_failed_files <- sum(!is_success)
+            n_failed_files <- sum(!is_success) # nolint
             cli::cli_abort(c(
                 "Cannot download {.val {n_failed_files}} file{?s}",
                 "i" = "url{?s}: {.url {urls[!is_success]}}",
                 "!" = paste(
                     "status {cli::qty(n_failed_files)} code{?s}:",
-                    "{.val {status[!is_success]}}"
+                    "{.val {status$status_code[!is_success]}}"
+                ),
+                x = paste(
+                    "error {cli::qty(n_failed_files)} message{?s}:",
+                    "{.val {status$error[!is_success]}}"
                 )
             ))
         }
     }
-    out
+    ans
 }
 
 #' @param status A data frame returned by [multi_download][curl::multi_download]
@@ -95,88 +109,53 @@ is_download_success <- function(status, successful_code = c(200L, 206L, 416L)) {
         (status$status_code %in% successful_code)
 }
 
-base_download_inform <-  function(urls, file_paths, ...) {
+base_download_inform <- function(urls, file_paths, ...) {
     out <- file_paths
     if (any(is_existed <- file.exists(file_paths))) {
         cli::cli_inform(paste(
             "Finding {.val {sum(is_existed)}} file{?s} already",
             "downloaded: {.file {basename(file_paths[is_existed])}}"
-        ))
+        )) # nolint
         urls <- urls[!is_existed]
         file_paths <- file_paths[!is_existed]
     }
-    
     if (l <- length(urls)) {
         assert_internet()
         if (l == 1L) {
-            cli::cli_inform("Downloading 1 file from: {.url {urls}}")
+            cli::cli_inform("Downloading file from: {.url {urls}}")
         } else {
             cli::cli_inform("Downloading {.val {l}} files")
         }
         
-        if (!requireNamespace("httr", quietly = TRUE)) {
-            stop("please install httr package: install.packages('httr')")
-        }
+
+        headers <- get_complete_headers()
         
-        user_agent <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        arg_list <- list(
+            urls = urls, destfiles = file_paths, resume = FALSE,
+            progress = interactive(), multi_timeout = Inf,
+            useragent = headers$`User-Agent`,
+            httpheader = c(
+                Accept = headers$Accept,
+                `Accept-Language` = headers$`Accept-Language`,
+                `Accept-Encoding` = headers$`Accept-Encoding`,
+                Connection = headers$Connection,
+                Referer = headers$Referer
+            )
+        )
         
-        download_with_retry <- function(url, destfile, max_attempts = 3) {
-            for (attempt in 1:max_attempts) {
-                tryCatch({
-                    if (attempt > 1) Sys.sleep(2)
-                    
-                    cli::cli_inform("try downloading {attempt}/{max_attempts}")
-                    
-                    response <- httr::GET(
-                        url,
-                        httr::user_agent(user_agent),
-                        httr::add_headers(
-                            Accept = "application/octet-stream",
-                            Referer = "https://www.fda.gov/"
-                        ),
-                        httr::timeout(30)
-                    )
-                    
-                    if (httr::status_code(response) != 200) {
-                        stop("HTTP Wrong: ", httr::status_code(response))
-                    }
-                    
-                    writeBin(httr::content(response, "raw"), destfile)
-                    
-                    if (file.exists(destfile) && file.size(destfile) > 0) {
-                        cli::cli_inform("✓ success: {.file {basename(destfile)}}")
-                        return(0L)  
-                    } else {
-                        stop("The downloaded file is empty or does not exist.")
-                    }
-                    
-                }, error = function(e) {
-                    cli::cli_warn("try downloading {attempt} fail: {e$message}")
-                    
-                    if (file.exists(destfile)) file.remove(destfile)
-                    if (attempt == max_attempts) {
-                        stop("All download attempts have failed.: ", e$message)
-                    }
-                })
-            }
-            return(1L)  
-        }
-        
-        status <- mapply(download_with_retry, urls, file_paths)
-        
-        is_success <- status == 0L
+        status <- do.call(curl::multi_download, arg_list)
+        is_success <- is_download_success(status)
         is_need_deleted <- !is_success & file.exists(file_paths)
         if (any(is_need_deleted)) file.remove(file_paths[is_need_deleted])
-        
         if (!all(is_success)) {
-            n_failed_files <- sum(!is_success)
+            n_failed_files <- sum(!is_success) # nolint
             cli::cli_abort(c(
-                "can't download {.val {n_failed_files}} file",
-                "i" = "URL: {.url {urls[!is_success]}}",
-                "x" = "Please check.:",
-                " " = "- Network connection",
-                " " = "- Whether the URL is valid",
-                " " = "- Website access permissions"
+                "Cannot download {.val {n_failed_files}} file{?s}",
+                "i" = "url{?s}: {.url {urls[!is_success]}}",
+                "!" = paste(
+                    "status {cli::qty(n_failed_files)} code{?s}:",
+                    "{.val {status$status_code[!is_success]}}"
+                )
             ))
         }
     }
@@ -191,5 +170,49 @@ build_faers_url <- function(type, years, quarters) {
         ifelse(laers_period, "aers", "faers"),
         ifelse(type == "ascii" | !laers_period, type, "sgml"),
         years, quarters
+    )
+}
+
+#' Complete Request Header Module
+#' @return 
+#' @noRd
+get_complete_headers <- function() {
+    user_agents <- c(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/91.0.864.59"
+    )
+    
+
+    referers <- c(
+        "https://www.fda.gov/drugs/surveillance/fda-adverse-event-reporting-system-faers",
+        "https://www.fda.gov/drugs/drug-approvals-and-databases/fda-adverse-event-reporting-system-faers",
+        "https://www.fda.gov/drugs",
+        "https://www.fda.gov",
+        "https://google.com"
+    )
+    
+    accept_encodings <- c(
+        "gzip, deflate, br",
+        "gzip, deflate",
+        "gzip"
+    )
+    
+
+    accept_languages <- c(
+        "en-US,en;q=0.9",
+        "en-US,en;q=0.8",
+        "en-GB,en;q=0.9,en-US;q=0.8"
+    )
+    
+    list(
+        `User-Agent` = sample(user_agents, 1),
+        Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        `Accept-Language` = sample(accept_languages, 1),
+        `Accept-Encoding` = sample(accept_encodings, 1),
+        Connection = "keep-alive",
+        Referer = sample(referers, 1)
     )
 }
