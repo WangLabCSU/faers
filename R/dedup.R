@@ -33,6 +33,9 @@ methods::setMethod("faers_dedup", "FAERSascii", function(object, remove_deleted_
     if (!object@standardization) {
         cli::cli_abort("{.cls FAERS} object must be standardized using {.fn faers_standardize} firstly")
     }
+    if (!is.null(object@db)) {
+        return(dedup_db(object, remove_deleted_cases = remove_deleted_cases))
+    }
     if (isTRUE(remove_deleted_cases)) {
         deleted_cases <- faers_deleted_cases(object)
         if (!length(deleted_cases)) {

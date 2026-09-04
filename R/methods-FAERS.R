@@ -60,6 +60,15 @@ methods::setMethod("faers_get", "FAERSascii", function(object, field) {
 })
 
 get_field <- function(object, field) {
+    if (!is.null(object@db)) {
+        # ---- duckdb path: materialize the field on demand ----
+        out <- db_collect(object@db@con, field)
+        if (object@standardization && any(field == c("indi", "reac"))) {
+            out <- faers_add_meddra(out, object@meddra@hierarchy)
+        }
+        return(out)
+    }
+    # ---- memory path: exactly as before ----
     out <- dt_shallow(object@data[[field]]) # make a shallow copy
     if (object@standardization && any(field == c("indi", "reac"))) {
         out <- faers_add_meddra(out, object@meddra@hierarchy)
@@ -106,6 +115,12 @@ methods::setGeneric("faers_primaryid", function(object, ...) {
 #' @method faers_primaryid FAERSascii
 #' @rdname FAERS-methods
 methods::setMethod("faers_primaryid", "FAERSascii", function(object) {
+    if (!is.null(object@db)) {
+        return(DBI::dbGetQuery(
+            object@db@con,
+            sprintf("SELECT primaryid FROM %s", db_field_table("demo"))
+        )$primaryid)
+    }
     object@data$demo$primaryid
 })
 
@@ -118,6 +133,13 @@ methods::setMethod("faers_primaryid", "FAERSascii", function(object) {
 #' @aliases [,FAERSascii-method
 #' @rdname FAERS-methods
 methods::setMethod("[", "FAERSascii", function(x, i) {
+    if (!is.null(x@db)) {
+        # db mode: materialize the selected fields on demand
+        fields <- x@data[i]
+        out <- lapply(names(fields), function(f) db_collect(x@db@con, f))
+        data.table::setattr(out, "names", names(fields))
+        return(out)
+    }
     x@data[i]
 })
 
@@ -125,6 +147,11 @@ methods::setMethod("[", "FAERSascii", function(x, i) {
 #' @aliases [[,FAERSascii-method
 #' @rdname FAERS-methods
 methods::setMethod("[[", "FAERSascii", function(x, i) {
+    if (!is.null(x@db)) {
+        # `@data[[i]]` is a FAERSdbTbl proxy whose @table holds the *physical*
+        # (already-prefixed) table name; collect it directly without re-prefixing.
+        return(db_collect_table(x@db@con, x@data[[i]]@table))
+    }
     x@data[[i]]
 })
 
@@ -132,6 +159,9 @@ methods::setMethod("[[", "FAERSascii", function(x, i) {
 #' @aliases $,FAERSascii-method
 #' @rdname FAERS-methods
 methods::setMethod("$", "FAERSascii", function(x, name) {
+    if (!is.null(x@db)) {
+        return(db_collect(x@db@con, rlang::ensym(name)))
+    }
     eval(substitute(x@data$name, list(name = rlang::ensym(name))))
 })
 
@@ -152,9 +182,12 @@ methods::setMethod("faers_keep", "FAERSascii", function(object, primaryid = NULL
     if (is.null(primaryid)) {
         return(object)
     }
+    .__primaryid__. <- unique(as.character(primaryid))
+    if (!is.null(object@db)) {
+        return(faers_keep_db(object, .__primaryid__., invert))
+    }
     # as all data has a column primaryid, we just rename the variable to use it
     # in the data.table `i`
-    .__primaryid__. <- unique(as.character(primaryid))
     if (isTRUE(invert)) {
         object@data <- lapply(object@data, function(x) {
             x[!.__primaryid__., on = "primaryid"]
@@ -166,6 +199,30 @@ methods::setMethod("faers_keep", "FAERSascii", function(object, primaryid = NULL
     }
     object
 })
+
+# db-mode faers_keep: filter every field's table by the kept primaryids and
+# rewrite in place (only the kept rows remain on disk in the object's db).
+faers_keep_db <- function(object, primaryid, invert) {
+    con <- object@db@con
+    ids <- data.table::data.table(primaryid = primaryid)
+    DBI::dbWriteTable(con, "__faers_keep_ids__", as.data.frame(ids),
+        overwrite = TRUE, temporary = TRUE
+    )
+    # `invert = FALSE` keeps only `primaryid` (delete everything else);
+    # `invert = TRUE` drops them (delete exactly those rows).
+    op <- if (isTRUE(invert)) "IN" else "NOT IN"
+    for (field in names(object@db@tables)) {
+        table_name <- object@db@tables[[field]]
+        DBI::dbExecute(
+            con,
+            sprintf(
+                "DELETE FROM %s WHERE primaryid %s (SELECT primaryid FROM __faers_keep_ids__)",
+                table_name, op
+            )
+        )
+    }
+    object
+}
 
 ##############################################################
 #' @export
@@ -231,6 +288,16 @@ methods::setGeneric("faers_modify", function(.object, ...) {
 methods::setMethod("faers_modify", "FAERSascii", function(.object, .field, .fn, ...) {
     .field <- match.arg(.field, FAERS_ASCII_FILE_FIELDS)
     out <- dt_shallow(.object@data[[.field]])
+    if (!is.null(.object@db)) {
+        # db-mode modify: materialize the field, apply .fn, write back.
+        out <- db_collect(.object@db@con, .field)
+        out <- rlang::as_function(.fn)(out, ...)
+        if (!data.table::is.data.table(out)) {
+            cli::cli_abort("{.fn .fn} must return a {.cls data.table}")
+        }
+        db_ingest(.object@db@con, .field, out)
+        return(invisible(.object))
+    }
     cannot_be_removed_cols <- c("year", "quarter", "primaryid")
     if (.object@standardization && any(.field == c("indi", "reac"))) {
         meddra_data <- .object@meddra@hierarchy

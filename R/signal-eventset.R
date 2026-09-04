@@ -165,13 +165,17 @@ methods::setMethod(
 .identify_event_set_patients <- function(object, event_set, event_type, ...) {
 
   if (event_type == "pt") {
-    data_table <- object@data$reac
     event_col <- "pt"
   } else if (event_type == "soc_name") {
-    data_table <- object@data$reac
     event_col <- "soc_name"
   } else {
     cli::cli_abort("Unsupported event type: {.val {event_type}}")
+  }
+
+  if (!is.null(object@db)) {
+    data_table <- db_collect(object@db@con, "reac")
+  } else {
+    data_table <- object@data$reac
   }
   
   if (is.character(event_set)) {
@@ -228,4 +232,4 @@ methods::setMethod(
   }
 )
 
-utils::globalVariables(c("a", "b", "c", "d", "n.1", "primaryid", "pt", "soc_name"))
+utils::globalVariables(c(".", "a", "b", "c", "d", "n.1", "primaryid", "pt", "soc_name"))

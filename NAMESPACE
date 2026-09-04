@@ -80,22 +80,26 @@ exportMethods(show)
 importClassesFrom(data.table,data.table)
 importFrom(BiocParallel,SerialParam)
 importFrom(cli,qty)
-importFrom(data.table,"%chin%")
-importFrom(data.table,":=")
-importFrom(data.table,.BY)
-importFrom(data.table,.EACHI)
-importFrom(data.table,.GRP)
-importFrom(data.table,.I)
-importFrom(data.table,.N)
-importFrom(data.table,.NGRP)
-importFrom(data.table,.SD)
-importFrom(data.table,data.table)
+importFrom(data.table,
+  "%chin%",
+  ":=",
+  .BY,
+  .EACHI,
+  .GRP,
+  .I,
+  .N,
+  .NGRP,
+  .SD,
+  data.table
+)
 importFrom(methods,show)
-importFrom(rlang,abort)
-importFrom(rlang,caller_arg)
-importFrom(rlang,caller_env)
-importFrom(rlang,ffi_standalone_check_number_1.0.7)
-importFrom(rlang,ffi_standalone_is_bool_1.0.7)
-importFrom(rlang,is_missing)
-importFrom(rlang,is_string)
-importFrom(rlang,is_vector)
+importFrom(rlang,
+  abort,
+  caller_arg,
+  caller_env,
+  ffi_standalone_check_number_1.0.7,
+  ffi_standalone_is_bool_1.0.7,
+  is_missing,
+  is_string,
+  is_vector
+)

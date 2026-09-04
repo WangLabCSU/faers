@@ -25,6 +25,9 @@ methods::setGeneric("faers_standardize", function(object, ...) {
 #' @method faers_standardize FAERSascii
 #' @rdname faers_standardize
 methods::setMethod("faers_standardize", "FAERSascii", function(object, meddra_path, add_smq = FALSE) {
+    if (!is.null(object@db)) {
+        return(standardize_db(object, meddra_path, add_smq = add_smq))
+    }
     # standardize PT terms
     # for indi
     assert_string(meddra_path)

@@ -62,6 +62,11 @@ methods::setMethod(
         if (!.object@standardization) {
             cli::cli_abort("{.arg .object} must be standardized using {.fn faers_standardize}")
         }
+        if (!is.null(.object@db)) {
+            return(counts_db(.object, .events = .events, .fn = .fn, ...,
+                .field = .field, .na.rm = .na.rm
+            ))
+        }
         data <- faers_get(.object, field = .field)
         if (!is.null(.fn)) {
             data <- rlang::as_function(.fn)(data, ...)

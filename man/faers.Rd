@@ -10,7 +10,9 @@ faers(
   format = NULL,
   dir = getwd(),
   compress_dir = dir,
-  handle_opts = list()
+  handle_opts = list(),
+  database = c("memory", "duckdb"),
+  db_path = NULL
 )
 }
 \arguments{
@@ -29,7 +31,15 @@ current working dir.}
 will be created if necessary.}
 
 \item{handle_opts}{Extra handle options passed to each request
-\link[curl:handle]{new_handle}.}
+\link[curl:new_handle]{new_handle}.}
+
+\item{database}{A string, one of \code{"memory"} (default) or \code{"duckdb"}.  With
+\code{"memory"}, all quarters are held in memory (original behavior).  With
+\code{"duckdb"}, quarterly data is written into a DuckDB database so it does not
+stay resident in memory; you keep the same analysis pipeline
+(standardize → dedup → counts → phv_signal) unchanged.}
+
+\item{db_path}{A string, the DuckDB file path used when \code{database = "duckdb"}.  Defaults to \code{":memory:"} (a transient in-memory database).}
 }
 \value{
 A \link{FAERSxml} or \link{FAERSascii} object.

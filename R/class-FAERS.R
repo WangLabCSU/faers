@@ -42,6 +42,7 @@
 NULL
 
 #' @include meddra.R
+#' @include class-FAERSdb.R
 methods::setClassUnion("MedDRAOrNull", c("NULL", "MedDRA"))
 
 #' @export
@@ -54,7 +55,8 @@ methods::setClass(
         meddra = "MedDRAOrNull",
         deduplication = "logical",
         standardization = "logical",
-        format = "character"
+        format = "character",
+        db = "FAERSdbOrNULL"
     ),
     prototype = list(
         year = integer(),
@@ -62,7 +64,8 @@ methods::setClass(
         data = NULL,
         meddra = NULL,
         deduplication = FALSE,
-        standardization = FALSE
+        standardization = FALSE,
+        db = NULL
     )
 )
 
@@ -119,8 +122,16 @@ methods::setValidity("FAERSascii", function(object) {
             "`@data` must contain the all ascii fields, including %s", oxford_comma(FAERS_ASCII_FILE_FIELDS)
         ))
     }
-    if (!all(vapply(data, data.table::is.data.table, logical(1L)))) {
-        return("`@data` must be a list of `data.table`")
+    if (is.null(object@db)) {
+        # memory mode: every field is a real data.table
+        if (!all(vapply(data, data.table::is.data.table, logical(1L)))) {
+            return("`@data` must be a list of `data.table`")
+        }
+    } else {
+        # duckdb mode: every field is a FAERSdbTbl proxy backed by @db
+        if (!all(vapply(data, methods::is, logical(1L), class2 = "FAERSdbTbl"))) {
+            return("`@data` must be a list of `FAERSdbTbl` when `@db` is set")
+        }
     }
     validate_faers(object)
 })
@@ -169,7 +180,11 @@ methods::setMethod("show", "FAERS", function(object) {
 #' @rdname FAERS-class
 methods::setMethod("show", "FAERSascii", function(object) {
     methods::callNextMethod(object)
-    n_reports <- nrow(object@data$demo)
+    if (is.null(object@db)) {
+        n_reports <- nrow(object@data$demo)
+    } else {
+        n_reports <- db_nrow(object@db@con, "demo")
+    }
     if (object@deduplication) {
         msg <- sprintf(
             "  Total unique report%s: %s",
@@ -199,6 +214,9 @@ methods::setGeneric("faers_data", function(object, ...) {
 #' @method faers_data FAERS
 #' @rdname FAERS-class
 methods::setMethod("faers_data", "FAERS", function(object) {
+    if (!is.null(object@db) && methods::is(object, "FAERSascii")) {
+        return(materialize(object)@data)
+    }
     object@data
 })
 

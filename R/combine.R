@@ -43,6 +43,23 @@ combine_faers <- function(x, call = rlang::caller_env()) {
     is_dedup <- combine_faers_deduplication(x, call = call)
     is_stand <- combine_faers_standardization(x, call = call)
     meddra <- combine_faers_meddra(x, standardization = is_stand, call = call)
+    is_db <- vapply(x, function(obj) !is.null(obj@db), logical(1L))
+    if (type == "ascii" && all(is_db)) {
+        elts <- combine_faers_db(x)
+        return(methods::new("FAERSascii",
+            data = elts$data,
+            deletedCases = unique(
+                unlist(lapply(x, faers_deleted_cases), use.names = FALSE)
+            ),
+            year = period$year, quarter = period$quarter,
+            standardization = is_stand, deduplication = is_dedup,
+            meddra = meddra,
+            db = elts$db
+        ))
+    }
+    if (type == "ascii" && any(is_db)) {
+        cli::cli_abort("Cannot mix {.arg database = \"memory\"} and {.arg database = \"duckdb\"} objects when combining.")
+    }
     data <- combine_faers_data(x, type)
     switch(type,
         ascii = methods::new("FAERSascii",
@@ -128,6 +145,13 @@ combine_faers_standardization <- function(lst, call = rlang::caller_env()) {
 }
 
 combine_faers_data <- function(x, type) {
+    is_db <- vapply(x, function(obj) !is.null(obj@db), logical(1L))
+    if (type == "ascii" && all(is_db)) {
+        return(combine_faers_db(x))
+    }
+    if (type == "ascii" && any(is_db)) {
+        cli::cli_abort("Cannot mix {.arg database = \"memory\"} and {.arg database = \"duckdb\"} objects when combining.")
+    }
     switch(type,
         ascii = combine_faers_ascii_data(x),
         xml = combine_faers_xml_data(x)

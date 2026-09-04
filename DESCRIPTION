@@ -32,6 +32,8 @@ Imports:
 Suggests: 
     BiocStyle,
     countrycode,
+    DBI,
+    duckdb,
     knitr,
     pak,
     rmarkdown,
@@ -40,17 +42,20 @@ biocViews: Software, DataImport, BiomedicalInformatics, Pharmacogenomics, Pharma
 Encoding: UTF-8
 ByteCompile: true
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
 Config/testthat/edition: 3
 Config/testthat/parallel: true
 VignetteBuilder: knitr
 Collate: 
     'athena.R'
     'available.R'
+    'class-FAERSdb.R'
     'meddra.R'
     'class-FAERS.R'
+    'combine-db.R'
     'combine.R'
+    'counts-db.R'
     'counts.R'
+    'dedup-db.R'
     'dedup.R'
     'download.R'
     'faers-package.R'
@@ -64,6 +69,7 @@ Collate:
     'merge.R'
     'meta.R'
     'methods-FAERS.R'
+    'parse-db.R'
     'parse.R'
     'period.R'
     'phv_.R'
@@ -72,9 +78,12 @@ Collate:
     'sample.R'
     'signal-eventset.R'
     'signal.R'
+    'standardize-db.R'
     'standardize.R'
     'unify.R'
     'utils-assert.R'
+    'utils-db.R'
     'utils-file.R'
     'utils-str.R'
     'utils.R'
+Config/roxygen2/version: 8.1.0

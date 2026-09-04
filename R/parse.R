@@ -17,8 +17,16 @@
 #'     system.file("extdata", "aers_ascii_2004q1.zip", package = "faers"),
 #'     compress_dir = tempdir()
 #' )
+#' @param database A string, one of `"memory"` (default) or `"duckdb"`.  With
+#' `"memory"`, data is held in memory exactly as before.  With `"duckdb"`, the
+#' quarter data is written into a DuckDB file so it does not stay resident in
+#' memory; see [faers] for details.
+#' @param db_path A string, the DuckDB file path used when `database =
+#' "duckdb"`.  Defaults to `":memory:"` (a transient in-memory database).
 #' @export
-faers_parse <- function(path, format = NULL, year = NULL, quarter = NULL, compress_dir = getwd()) {
+faers_parse <- function(path, format = NULL, year = NULL, quarter = NULL, compress_dir = getwd(),
+                        database = c("memory", "duckdb"), db_path = NULL) {
+    database <- match.arg(database)
     assert_string(path, allow_empty = FALSE)
     if (is.null(format)) {
         format <- str_extract(basename(path), "xml|ascii", ignore.case = TRUE)
@@ -40,9 +48,12 @@ faers_parse <- function(path, format = NULL, year = NULL, quarter = NULL, compre
         pattern = "20\\d{2}q[1-4]\\.zip$",
         none_msg = c(
             "Only compressed zip files from FAERS Quarterly Data can work",
-            i = "with pattern: \"20\\\\d{{2}}q[1-4]\\\\.zip\""
+            i = "with pattern: \"20\\d{{2}}q[1-4]\\.zip\""
         )
     )
+    if (database == "duckdb") {
+        return(parse_to_db(path, year, quarter, format = format, db_path = db_path))
+    }
     switch(format,
         xml = parse_xml(path, year, quarter),
         ascii = parse_ascii(path, year, quarter)

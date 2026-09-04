@@ -9,7 +9,9 @@ faers_parse(
   format = NULL,
   year = NULL,
   quarter = NULL,
-  compress_dir = getwd()
+  compress_dir = getwd(),
+  database = c("memory", "duckdb"),
+  db_path = NULL
 )
 }
 \arguments{
@@ -29,6 +31,13 @@ will be extracted from path.}
 
 \item{compress_dir}{A string specifies the directory to extract files to. It
 will be created if necessary.}
+
+\item{database}{A string, one of \code{"memory"} (default) or \code{"duckdb"}.  With
+\code{"memory"}, data is held in memory exactly as before.  With \code{"duckdb"}, the
+quarter data is written into a DuckDB file so it does not stay resident in
+memory; see \link{faers} for details.}
+
+\item{db_path}{A string, the DuckDB file path used when \code{database = "duckdb"}.  Defaults to \code{":memory:"} (a transient in-memory database).}
 }
 \value{
 A \link{FAERSxml} or \link{FAERSascii} object.
