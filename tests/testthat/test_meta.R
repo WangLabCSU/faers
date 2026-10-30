@@ -1,4 +1,5 @@
 testthat::test_that("Parsing external FAERS metadata works well", {
+    testthat::skip_on_cran()
     testthat::skip_if_offline()
     testthat::expect_message(gds <- faers_meta(force = TRUE), "Reading html")
     testthat::expect_s3_class(gds, "data.table")

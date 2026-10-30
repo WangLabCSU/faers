@@ -5,6 +5,7 @@
 ^Scratch\.RConsole$
 ^data-raw$
 ^\.github$
+^_pkgdown\.yml$
 ^README\.Rmd$
 ^README\.md$
 ^README\.html$

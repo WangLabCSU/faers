@@ -23,7 +23,8 @@ The function lists the metadata for the FAERS databases currently
 available to download.
 }
 \examples{
-faers_meta()
+# Queries the FDA website (falls back to bundled metadata without internet):
+faers_meta(internal = !curl::has_internet())
 }
 \seealso{
 \url{https://fis.fda.gov/extensions/FPD-QDE-FAERS/FPD-QDE-FAERS.html}

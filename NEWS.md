@@ -1,5 +1,20 @@
 # faers 1.5.6
 
+* Added `faers_reports_with()`, a report set constructor for drug exposure
+  definitions: reports whose drug records match a combination of drug name
+  patterns (case-insensitive regular expressions), optionally restricted per
+  drug to specific role codes (`.roles`) and optionally excluding reports
+  containing other drugs (`.exclude_drugs`, report-level and role-agnostic).
+  `.logic = "and"/"or"` combines patterns; two patterns may be satisfied by
+  the same drug row (fixed-dose combination products). Returns the filtered
+  object, sorted `primaryid` vector or a count. On duckdb-backed objects
+  plain-literal patterns are pushed down to SQL (`regexp_matches`), other
+  patterns fall back to identical R matching. Per-drug matches are combined
+  across ASCII and non-ASCII rows before AND/OR and report-level exclusions;
+  object-mode returns build on a private copy, leaving the source database
+  untouched. Per-pattern hit counts are reported as a message; empty result
+  sets are a legitimate outcome, not an error.
+
 * Added `faers_restrict()`, a report-level restriction helper that narrows a
   standardized FAERS object to a sub-population by reporting period
   (`.period`), date window (`.date_range` on `.date_field`, with partial

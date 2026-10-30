@@ -37,7 +37,8 @@ Suggests:
     knitr,
     pak,
     rmarkdown,
-    testthat (>= 3.0.0)
+    testthat (>= 3.0.0),
+    withr
 biocViews: Software, DataImport, BiomedicalInformatics, Pharmacogenomics, Pharmacogenomics
 Encoding: UTF-8
 ByteCompile: true
@@ -74,6 +75,7 @@ Collate:
     'period.R'
     'phv_.R'
     'phv_ebgm.R'
+    'restrict-drug.R'
     'restrict.R'
     'rxnorm.R'
     'sample.R'

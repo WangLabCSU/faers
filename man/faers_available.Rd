@@ -28,5 +28,6 @@ This function check if data for the years and quarters selected are
 available at FAERS to be downloaded.
 }
 \examples{
-faers_available(c(2011, 2023), c("q1", "q2"))
+# Queries the FDA website (falls back to bundled metadata without internet):
+faers_available(c(2011, 2023), c("q1", "q2"), internal = !curl::has_internet())
 }

@@ -10,7 +10,8 @@
 #' @return A logical indicates FAERS can have data for the `years` and
 #' `quarters` required?
 #' @examples
-#' faers_available(c(2011, 2023), c("q1", "q2"))
+#' # Queries the FDA website (falls back to bundled metadata without internet):
+#' faers_available(c(2011, 2023), c("q1", "q2"), internal = !curl::has_internet())
 #' @export
 faers_available <- function(years, quarters, force = FALSE, internal = FALSE) {
     assert_inclusive(quarters, FAERS_FILE_QUARTERS)

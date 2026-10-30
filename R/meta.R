@@ -11,7 +11,8 @@
 #' @return A [data.table][data.table::data.table] reporting years, period,
 #' quarter, and file urls and file sizes.
 #' @examples
-#' faers_meta()
+#' # Queries the FDA website (falls back to bundled metadata without internet):
+#' faers_meta(internal = !curl::has_internet())
 #' @seealso
 #' <https://fis.fda.gov/extensions/FPD-QDE-FAERS/FPD-QDE-FAERS.html>
 #' @export
