@@ -1,5 +1,40 @@
 # faers 1.5.7
 
+* Added `faers_compare()`, a multi-group comparison entry point that runs one
+  orchestrated analysis over several drug exposure definitions in a single
+  study scope. It returns the group summary, the per-group event spectrum, the
+  comparisons actually performed, the full contingency table and signal
+  metrics for every comparison x event, event x group count/share/signal
+  matrices, the group overlaps and the run metadata. Two modes are kept
+  strictly separate and identified in the results: `"background"` compares
+  each group against the rest of the shared scope (`a + b + c + d == |U|`, the
+  same universe for every group), while `"pairwise"` compares two selected
+  groups against each other (`a + b + c + d == |G1| + |G2|`, a denominator
+  that changes per pair). `"pairwise"` never runs implicitly: every pair must
+  be listed in `.comparisons`, because per-pair denominators invite
+  uncorrected multiple comparisons. `"joint"` splitting derives the mutually
+  exclusive `A-only` / `B-only` / `A+B` / `Neither` report groups, complementing
+  B against the same role-restricted exposure rules used to define B. The
+  statistics are not reimplemented: each table is handed to the same
+  `phv_signal()` a single-group analysis uses, so a group x event row is
+  byte-identical to the equivalent standalone `faers_phv_signal()` call.
+  Difficulty-of-use safeguards are explicit: `.mode = "pairwise"` with an
+  overlapping pair refuses to build a table unless the overlap is reconciled
+  with `.overlap`, `.min_a` is `0` by default (no implicit threshold) and the
+  number of dropped rows is reported, and `.top_n` truncates only the display
+  layer (event spectrum and matrices) while `signal_results` keeps every row
+  and the truncation is flagged as `display_subset` in the attributes and the
+  metadata. Joint-group output is a descriptive comparison and
+  disproportionality analysis of co-reported drugs, **not** a formal
+  interaction test.
+
+* Added `faers_group_ids()`, the report-set layer behind `faers_compare()`:
+  it builds one `primaryid` set per named drug exposure definition on top of
+  `faers_reports_with()`, reports every pairwise intersection (and the strategy
+  applied to it), builds the mutually exclusive joint groups, and returns a
+  report x group membership matrix. `.min_a`-style filtering, statistics and
+  display concerns stay out of this layer.
+
 * Fixed `faers_counts()` on duckdb-backed objects for the `reac` event columns
   that live in the field itself (`pt`, `meddra_code`, `meddra_pt`): the SQL
   builder qualified every event column with the MedDRA hierarchy alias, so
