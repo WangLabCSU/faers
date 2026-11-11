@@ -97,6 +97,29 @@ testthat::test_that("faers_counts matches in db mode (single/multi event, na.rm,
     )
 })
 
+# Regression: the SQL builder qualified EVERY event column with the MedDRA
+# hierarchy alias `m.`, but `pt`/`meddra_code`/`meddra_pt` live in `reac`
+# itself and are not columns of the hierarchy table. `.events = "pt"` therefore
+# failed with `Binder Error: Table "m" does not have a column named "pt"` on a
+# duckdb-backed object, while the in-memory path worked. Only the hierarchy's
+# own columns may be qualified.
+testthat::test_that("faers_counts matches in db mode for reac's own event columns", {
+    testthat::skip_if_not(has_duckdb)
+    mem <- sample_object()
+    db <- db_twin(mem)
+    for (ev in c("pt", "meddra_code", "meddra_pt")) {
+        testthat::expect_identical(
+            faers_counts(mem, .events = ev, .field = "reac"),
+            faers_counts(db, .events = ev, .field = "reac")
+        )
+    }
+    # A mixed selection must resolve each column on the right side of the join.
+    testthat::expect_identical(
+        faers_counts(mem, .events = c("pt", "soc_name"), .field = "reac"),
+        faers_counts(db, .events = c("pt", "soc_name"), .field = "reac")
+    )
+})
+
 testthat::test_that("faers_phv_table contingency table matches in db mode", {
     testthat::skip_if_not(has_duckdb)
     mem <- sample_object()

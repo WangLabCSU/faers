@@ -45,7 +45,11 @@ counts_db <- function(.object, .events = "soc_name", .fn = NULL, ...,
     if (meddra && !DB_MEDDRA_TABLE %in% DBI::dbListTables(.object@db@con)) {
         db_ingest_meddra(.object@db@con, .object)
     }
-    q <- db_counts_query(.field, .events, na_rm = .na.rm, meddra = meddra)
+    q <- db_counts_query(
+        .field, .events,
+        na_rm = .na.rm, meddra = meddra,
+        hierarchy = db_meddra_columns(.object)
+    )
     out <- DBI::dbGetQuery(.object@db@con, q)
     out <- data.table::as.data.table(out)
     # Byte-parity with the memory path (keyby + integer counts):

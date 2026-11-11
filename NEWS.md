@@ -1,3 +1,26 @@
+# faers 1.5.7
+
+* Fixed `faers_counts()` on duckdb-backed objects for the `reac` event columns
+  that live in the field itself (`pt`, `meddra_code`, `meddra_pt`): the SQL
+  builder qualified every event column with the MedDRA hierarchy alias, so
+  `.events = "pt"` failed with a binder error. Only the columns actually added
+  by the hierarchy join (`soc_name`, `pt_name`, ...) are now qualified, which
+  also makes the duckdb count for `pt`/`meddra_code`/`meddra_pt` identical to
+  the in-memory path. The same fix applies to the counting path used by
+  `faers_compare()`.
+
+* Fixed `phv_chisq()`, `phv_fisher()` and `phv_bcpnn_mcmc()` on zero-length
+  input: they built their result from a list of per-row results and then named
+  the columns unconditionally, so a zero-length call aborted with
+  `无法将 N 个名字赋值给一个包含 0 列的 data.table`. This was reachable
+  through the public API, e.g.
+  `faers_phv_signal(faers_keep(obj, character()), .events = "pt", .full = obj,
+  .methods = "chisq")`. They now return their full schema with zero rows, which
+  keeps the result bindable with a populated one and gives `phv_signal()` a
+  single source of truth for the metric columns. As a consequence an empty
+  selection in `faers_compare()` now returns the same `signal_results` columns
+  as a populated one, so an explicit `.matrix_metric` no longer fails there.
+
 # faers 1.5.6
 
 * Added `faers_reports_with()`, a report set constructor for drug exposure
