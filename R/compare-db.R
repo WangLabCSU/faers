@@ -10,33 +10,71 @@
 # multi-quarter on-disk database.
 #
 # Instead the group is registered as a TEMP table and the aggregation happens
-# in a single read-only SELECT. The user's tables are never modified: only
-# `__faers_compare_ids__` is created (and overwritten) in the session.
+# in a single read-only SELECT. The user's tables are never modified.
+#
+# The temp table name is generated per call rather than fixed. A fixed name is
+# not safe: `dbWriteTable(temporary = TRUE)` does not shadow a same-named
+# permanent table, it REPLACES it, so a fixed name would destroy whatever the
+# user had called `__faers_compare_ids__` - and on an on-disk database the loss
+# survives the session. The generated name is checked against the tables the
+# connection already knows, so a collision cannot happen; the table is dropped
+# again once the counts have been read.
 #
 # Results are aligned byte-for-byte with the in-memory path exactly like
 # `counts_db()` (R/counts-db.R) does: BIGINT -> integer coercion, `setkeyv()`
-# on the event columns, and a materialize-and-fall-back path for an arbitrary
-# `.fn` preprocessor that cannot be translated to SQL.
+# on the event columns. Callback preprocessing is shared by both backends in
+# R/compare.R.
 
-.COMPARE_ID_TABLE <- "__faers_compare_ids__"
+# Generates a name no table of this connection currently uses. Deterministic
+# (no RNG, so the caller's random stream is untouched) and cheap: one
+# `dbListTables()` per group next to the aggregate query that follows.
+.compare_id_seq <- new.env(parent = emptyenv())
+.compare_id_seq$n <- 0L
 
-# Register `ids` as the temporary group table. A zero-length set is legal and
-# yields a zero-row table, so empty groups need no special case downstream.
+compare_id_table <- function(con) {
+    existing <- DBI::dbListTables(con)
+    repeat {
+        .compare_id_seq$n <- .compare_id_seq$n + 1L
+        nm <- sprintf(
+            "__faers_compare_ids_%d_%d__", Sys.getpid(), .compare_id_seq$n
+        )
+        if (!nm %in% existing) {
+            return(nm)
+        }
+    }
+}
+
+# Register `ids` as a temporary group table and return its name. A zero-length
+# set is legal and yields a zero-row table, so empty groups need no special
+# case downstream.
+#
+# `overwrite = FALSE` is deliberate rather than redundant: `compare_id_table()`
+# already guarantees the name is free, and refusing to write over anything is
+# the one behaviour that can never lose a user table. If the guarantee is ever
+# broken the call errors out loudly instead of destroying data.
 compare_ingest_ids <- function(con, ids) {
+    tbl <- compare_id_table(con)
     DBI::dbWriteTable(
-        con, .COMPARE_ID_TABLE,
+        con, tbl,
         data.frame(primaryid = as.character(ids)),
-        overwrite = TRUE, temporary = TRUE
+        overwrite = FALSE, temporary = TRUE
     )
+    tbl
+}
+
+# Drop a temp table created by `compare_ingest_ids()`. Only ever called on a
+# name this session generated, so it can never touch a user's table.
+compare_drop_ids <- function(con, tbl) {
+    DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s", db_qident(tbl)))
     invisible(con)
 }
 
 # One aggregate per event combination, restricted to the registered group.
 # Mirrors `db_counts_query()` but scopes `COUNT(DISTINCT primaryid)` to the
-# join against `__faers_compare_ids__`. Every column reference is qualified
-# because both sides of the join carry `primaryid`.
-compare_counts_query <- function(field, events, na_rm = FALSE, meddra = FALSE,
-                                 hierarchy = character()) {
+# join against `id_table`. Every column reference is qualified because both
+# sides of the join carry `primaryid`.
+compare_counts_query <- function(field, events, id_table, na_rm = FALSE,
+                                 meddra = FALSE, hierarchy = character()) {
     if (isTRUE(meddra)) {
         from <- sprintf(
             "%s AS f LEFT JOIN %s AS m ON f.meddra_hierarchy_idx = m.idx",
@@ -50,7 +88,7 @@ compare_counts_query <- function(field, events, na_rm = FALSE, meddra = FALSE,
         ev <- vapply(events, function(e) paste0("f.", db_qident(e)), character(1L))
     }
     join_ids <- sprintf(
-        "INNER JOIN %s AS g ON f.primaryid = g.primaryid", .COMPARE_ID_TABLE
+        "INNER JOIN %s AS g ON f.primaryid = g.primaryid", db_qident(id_table)
     )
     where <- ""
     if (isTRUE(na_rm)) {
@@ -68,62 +106,24 @@ compare_counts_query <- function(field, events, na_rm = FALSE, meddra = FALSE,
     )
 }
 
-# Collect the rows of `field` that belong to `ids`, with the MedDRA hierarchy
-# attached for `reac`/`indi` so the result matches `faers_get()` exactly. Used
-# only for the black-box `.fn` fallback.
-compare_collect_field <- function(.object, .ids, .field) {
-    con <- .object@db@con
-    compare_ingest_ids(con, .ids)
-    out <- data.table::as.data.table(DBI::dbGetQuery(
-        con,
-        sprintf(
-            "SELECT f.* FROM %s AS f INNER JOIN %s AS g ON f.primaryid = g.primaryid",
-            db_field_table(.field), .COMPARE_ID_TABLE
-        )
-    ))
-    if (.object@standardization && any(.field == c("indi", "reac"))) {
-        out <- faers_add_meddra(out, .object@meddra@hierarchy)
-    }
-    out
-}
-
 # Database-mode per-group counting. Used by `faers_compare()` for every group
 # on a duckdb-backed object; the in-memory backend keeps using
 # `faers_keep()` + `faers_counts()`.
-compare_counts_db <- function(.object, .ids, .events, .fn = NULL, ...,
+compare_counts_db <- function(.object, .ids, .events,
                               .field = "reac", .na.rm = FALSE) {
     assert_bool(.na.rm)
     con <- .object@db@con
-
-    if (!is.null(.fn)) {
-        # Black-box preprocessor: same rule as `counts_db()` (design doc §3.5) -
-        # materialize the field for the group and run the in-memory logic.
-        data <- compare_collect_field(.object, .ids, .field)
-        data <- rlang::as_function(.fn)(data, ...)
-        if (!data.table::is.data.table(data)) {
-            cli::cli_abort("{.fn .fn} must return a {.cls data.table}")
-        }
-        groups <- c("primaryid", .events)
-        data <- unique(data, by = groups, cols = character())
-        if (.na.rm) {
-            keep <- !Reduce(`|`, lapply(data[, .SD, .SDcols = .events], is.na))
-            data <- data[keep]
-        }
-        return(eval(substitute(
-            data[, list(N = .N), keyby = .events],
-            list(.events = .events)
-        )))
-    }
 
     meddra <- field_needs_meddra(.object, .field)
     if (meddra && !DB_MEDDRA_TABLE %in% DBI::dbListTables(con)) {
         db_ingest_meddra(con, .object)
     }
-    compare_ingest_ids(con, .ids)
+    tbl <- compare_ingest_ids(con, .ids)
+    on.exit(compare_drop_ids(con, tbl), add = TRUE)
     out <- data.table::as.data.table(DBI::dbGetQuery(
         con,
         compare_counts_query(
-            .field, .events,
+            .field, .events, id_table = tbl,
             na_rm = .na.rm, meddra = meddra,
             hierarchy = db_meddra_columns(.object)
         )

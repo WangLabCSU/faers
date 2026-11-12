@@ -29,8 +29,13 @@ faers_compare(
 
 \item{.groups}{A named list of group definitions, see \code{\link[=faers_group_ids]{faers_group_ids()}}.}
 
-\item{...}{Other arguments passed to \code{\link[=faers_counts]{faers_counts()}}, e.g. \code{.field},
-\code{.fn} or \code{.na.rm}.}
+\item{...}{Counting options from \code{\link[=faers_counts]{faers_counts()}}, e.g. \code{.field},
+\code{.fn} or \code{.na.rm}. A supplied \code{.fn} runs once on the study scope's
+selected field, which is read into memory on both backends. It must
+return a data.table with \code{primaryid} and all \code{.events} columns, and its
+report IDs must belong to the study scope. Additional arguments are passed
+to \code{.fn}. When \code{.na.rm = TRUE}, rows with missing event values are omitted
+from event counts. Denominators use all reports in each group or study scope.}
 
 \item{.split}{\code{"none"} (default) or \code{"joint"}; see \code{\link[=faers_group_ids]{faers_group_ids()}}.}
 
@@ -53,7 +58,10 @@ the combination defines the event, and the matrices use a collapsed
 selector that narrows them. As in \code{\link[=faers_phv_composite]{faers_phv_composite()}} it may be a
 character vector of event values, a logical vector with one value per
 candidate event, or a function applied to the event values that returns a
-logical vector. Unlike \code{\link[=faers_phv_composite]{faers_phv_composite()}} the selected events are
+logical vector. Selectors use the sorted distinct values of the first
+\code{.events} column, with missing values last when present. A function can
+select numeric values or missing values, for example using \code{is.na}.
+Unlike \code{\link[=faers_phv_composite]{faers_phv_composite()}} the selected events are
 \strong{not} collapsed into a single composite row: each event keeps its own row
 in \code{event_profile} and \code{signal_results}, which is what makes the event
 spectrum and the signal matrix meaningful. The candidate count, the
@@ -85,22 +93,36 @@ or the name of the metric column to place in \code{matrices$signal}.}
 A named list of \link[data.table:data.table]{data.table} objects:
 \itemize{
 \item \code{group_summary}: groups, report counts, share of scope, overlap removals,
-definitions and the single-row combination count.
+source exposure definitions and the single-row combination count. See
+\code{\link[=faers_group_ids]{faers_group_ids()}} for the columns in this table.
 \item \code{event_profile}: per group and event, \code{N} reports, the \code{denominator} and
 the within-group \code{share}, plus the same quantities over the whole scope
 (\code{universe_N}, \code{universe_share}). Every group is laid out over the scope's
 candidate events, so absent combinations appear as \code{N = 0} and the table is
-a complete events x groups grid that lines up with \code{signal_results}.
+a complete events x groups grid. Its events are a superset of the ones in
+\code{signal_results}, which \code{.min_a} narrows to the tested comparisons; with
+\code{.top_n} it is the displayed grid that every matrix shares.
 \item \code{comparisons}: which group was compared with which background, the group
-sizes and the overlap removal counts.
+sizes and the overlap removal counts. For a pair, \code{n_overlap_shared}
+counts reports shared by the two groups before reconciliation, using the
+original definition for each single-definition group and the final set
+for a derived intersection or complement. \code{n_overlap_removed} counts the
+shared reports absent from both final groups, once per report.
 \item \code{signal_results}: one row per comparison x event with \code{a}, \code{b}, \code{c}, \code{d},
 the \code{expected} count, every metric from \code{\link[=phv_signal]{phv_signal()}} and a \code{status}
-column (\code{"ok"}, \code{"zero_cell"}, \code{"empty_group"}).
+column (\code{"ok"}, \code{"zero_cell"}, \code{"empty_group"}). The status is
+\code{"empty_group"} if either side of the comparison has no reports.
 \item \code{matrices}: \code{count}, \code{share} and one signal matrix (named after
 \code{.matrix_metric}, or \code{signal} for the default \verb{*_ci_low} column), each
-event x group/comparison.
+event x group/comparison. \code{count} and \code{share} cover the profile's events;
+with a signal metric selected, the signal matrix has one column per
+planned comparison and covers the events in \code{signal_results}. With
+\code{.top_n}, it covers all displayed events in the same order as the count
+matrix. Cells without a signal result contain \code{NA}.
 \item \code{metadata}: scope, groups, events, comparison and denominator definitions,
-versions, missing-data and truncation records.
+versions, missing-data and truncation records. Overlap diagnostics count
+pairs with a nonempty intersection and distinct reports shared by two or
+more input definitions, before splitting or overlap handling.
 \item \code{group_overlaps}: pairwise intersections of the exposure definitions.
 }
 }
@@ -164,10 +186,13 @@ precisely so that the four-way partition stays reportable.
 \code{.top_n}, when set, only truncates the \emph{display} layer (\code{event_profile} and
 \code{matrices}) using the rule "per group, keep the top N events by report count,
 then take the union across groups"; ties break on the event label so the
-result is deterministic. Truncated results are flagged with
-\code{attr(., "display_subset") = TRUE} and recorded in
-\code{metadata$display_subset}. \code{signal_results} always keeps every row so that
-downstream filtering sees \code{status} instead of missing data.
+result is deterministic. The matrices use the same event order, and the
+event profile covers the same events. When a signal metric is available,
+the matrix retains a column for every planned comparison and fills cells
+without a result with \code{NA}. The event profile is flagged with
+\code{attr(., "display_subset") = TRUE} and the selection is recorded in
+\code{metadata$display_subset}. \code{signal_results} includes every result that
+meets \code{.min_a}.
 }
 }
 \examples{

@@ -16,7 +16,8 @@ faers_group_ids(
 \item{.object}{A \link{FAERSascii} object, standardized with
 \code{\link[=faers_standardize]{faers_standardize()}}. It defines the study scope \code{U}.}
 
-\item{.groups}{A named list of group definitions, see \emph{Details}.}
+\item{.groups}{A named list of group definitions, see \emph{Details}.
+The name \code{primaryid} is reserved for the report ID column.}
 
 \item{.split}{\code{"none"} (default) keeps the groups as given; \code{"joint"} splits
 exactly two groups into \code{A-only}, \code{B-only}, \code{A+B} and \code{Neither}.}
@@ -32,14 +33,25 @@ single-row (fixed-dose combination) share is computed for
 A named list:
 \itemize{
 \item \code{ids}: named list of sorted, unique \code{primaryid} character vectors.
+\item \code{raw_ids}: report ID sets named by the input definitions, before
+splitting or overlap handling.
 \item \code{membership}: \link[data.table:data.table]{data.table} with one row per scope
 report and one logical column per group.
 \item \code{summary}: \link[data.table:data.table]{data.table} with \code{group}, \code{n_reports},
 \code{share_of_scope}, \code{n_removed_overlap}, \code{is_empty}, the definition columns
 \code{drugs}, \code{roles}, \code{logic}, \code{exclude_drugs}, \code{drug_col}, \code{n_patterns}, and
-\code{n_single_row_both}.
+\code{n_single_row_both}. The \code{source_definitions} list column contains the
+named exposure definitions used to build the group, with resolved drug
+columns. For an intersection, \code{drugs} and \code{n_patterns} cover both
+definitions, \code{roles} are keyed by source group, and \code{logic = "and"}
+describes the intersection of the two definitions. The scalar
+\code{drug_col} is \code{NA} if the definitions use different columns.
+For a group derived from a single definition,
+\code{n_removed_overlap} counts reports removed from that definition. The
+intersection and \code{Neither} have zero removals.
 \item \code{overlaps}: \link[data.table:data.table]{data.table} with \code{group1}, \code{group2},
 \code{n_intersection} and \code{strategy}.
+\item \code{scope_ids}: report IDs in the study scope.
 }
 }
 \description{

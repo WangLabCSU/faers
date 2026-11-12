@@ -71,22 +71,66 @@ utils::globalVariables(c(
 
 # ---------- counting ----------
 
-# Per-group event counts, on either backend. The memory backend reuses
-# `faers_keep()` + `faers_counts()`; the duckdb backend uses the TEMP-table
-# join in R/compare-db.R so the user's database is never modified.
-.compare_group_count <- function(.object, ids, .events, dots) {
-    if (is.null(.object@db)) {
-        sub <- faers_keep(.object, ids)
-        return(do.call(faers_counts, c(list(.object = sub, .events = .events), dots)))
+# Count every group against the same event data. The callback uses the
+# argument conventions of faers_counts() and runs once over the study scope.
+.compare_event_counts <- function(.object, scope_ids, ids, .events, dots) {
+    count_events <- function(.fn = NULL, ..., .field = "reac", .na.rm = FALSE) {
+        if (is.null(.fn)) {
+            count_group <- function(group_ids) {
+                if (is.null(.object@db)) {
+                    return(faers_counts(
+                        faers_keep(.object, group_ids), .events = .events,
+                        .field = .field, .na.rm = .na.rm
+                    ))
+                }
+                compare_counts_db(.object, group_ids, .events,
+                    .field = .field, .na.rm = .na.rm
+                )
+            }
+            return(list(scope = count_group(scope_ids), groups = lapply(ids, count_group)))
+        }
+
+        data <- faers_get(.object, .field)
+        if (is.null(.object@db)) {
+            data <- data.table::copy(data)
+        }
+        data <- rlang::as_function(.fn)(data, ...)
+        if (!data.table::is.data.table(data)) {
+            cli::cli_abort("{.arg .fn} must return a {.cls data.table}")
+        }
+        columns <- unique(c("primaryid", .events))
+        missing <- setdiff(columns, names(data))
+        if (length(missing)) {
+            cli::cli_abort("{.arg .fn} must retain the required columns {.val {missing}}")
+        }
+        data <- unique(data[, columns, with = FALSE])
+        if (!all(data$primaryid %in% scope_ids)) {
+            cli::cli_abort("{.arg .fn} must return report IDs from the study scope in {.field primaryid}")
+        }
+        if (.na.rm) {
+            keep <- !Reduce(`|`, lapply(data[, .SD, .SDcols = .events], is.na))
+            data <- data[keep]
+        }
+        tally <- function(rows) {
+            eval(substitute(
+                rows[, list(N = .N), keyby = events],
+                list(events = .events)
+            ))
+        }
+        list(
+            scope = tally(data),
+            groups = lapply(ids, function(group_ids) {
+                keep_rows <- data$primaryid %in% group_ids
+                tally(data[keep_rows])
+            })
+        )
     }
-    do.call(compare_counts_db, c(
-        list(.object = .object, .ids = ids, .events = .events), dots
-    ))
+    do.call(count_events, dots)
 }
 
 # Event-set restriction ------------------------------------------------
 #
-# `.event_set` narrows the candidate events before any counting, mirroring the
+# `.event_set` narrows the candidate events after counting, mirroring the
 # semantics of `faers_phv_composite()` (R/signal-eventset.R): a character
 # vector selects events by value, a logical vector by position, and a function
 # is applied to the event column. Unlike `faers_phv_composite()` the events are
@@ -94,12 +138,8 @@ utils::globalVariables(c(
 # event spectrum and signal matrix is one row per event, so the set only
 # decides which events stay.
 
-# Evaluate the selector against the event values and return the kept values, or
-# `NULL` when no `.event_set` was given.
-.compare_event_keep <- function(event_values, .event_set, .events) {
-    if (is.null(.event_set)) {
-        return(NULL)
-    }
+# Evaluate the selector against the event values and return the kept values.
+.compare_event_keep <- function(event_values, .event_set) {
     if (is.function(.event_set)) {
         keep <- .event_set(event_values)
     } else if (is.logical(.event_set)) {
@@ -111,7 +151,7 @@ utils::globalVariables(c(
         }
         keep <- .event_set
     } else if (is.character(.event_set)) {
-        keep <- event_values %chin% .event_set
+        keep <- event_values %in% .event_set
     } else {
         cli::cli_abort(
             "{.arg .event_set} must be a character vector, a logical vector, or a function"
@@ -132,15 +172,15 @@ utils::globalVariables(c(
     if (is.null(.event_set)) {
         return(list(per_group = per_group, scope_counts = scope_counts, n_selected = NULL))
     }
-    values <- sort(unique(c(
-        scope_counts[[.events[[1L]]]],
-        unlist(lapply(per_group, function(x) x[[.events[[1L]]]]), use.names = FALSE)
-    )))
-    keep <- .compare_event_keep(values, .event_set, .events)
+    event_col <- .events[[1L]]
+    values <- sort(unique(scope_counts[[event_col]]), na.last = TRUE)
+    keep <- .compare_event_keep(values, .event_set)
     per_group <- lapply(per_group, function(x) {
-        x[get(.events[[1L]]) %chin% keep]
+        keep_rows <- x[[event_col]] %in% keep
+        x[keep_rows]
     })
-    scope_counts <- scope_counts[get(.events[[1L]]) %chin% keep]
+    keep_rows <- scope_counts[[event_col]] %in% keep
+    scope_counts <- scope_counts[keep_rows]
     list(
         per_group = per_group, scope_counts = scope_counts,
         n_selected = length(keep), n_candidates = length(values)
@@ -175,7 +215,8 @@ utils::globalVariables(c(
     out <- rep("ok", nrow(ct))
     zero <- ct$a == 0L | ct$b == 0L | ct$c == 0L | ct$d == 0L
     out[zero] <- "zero_cell"
-    out[ct$a == 0L & ct$b == 0L] <- "empty_group"
+    empty <- (ct$a == 0L & ct$b == 0L) | (ct$c == 0L & ct$d == 0L)
+    out[empty] <- "empty_group"
     out
 }
 
@@ -195,15 +236,46 @@ utils::globalVariables(c(
 
 # Event x group counts into a wide matrix. `.what` selects the value column;
 # for multi-column `.events` the label column is the collapsed `event_label`.
-.compare_matrix <- function(profile, label_col, group_col, value_col, groups) {
+#
+# A cast needs exactly one row per (label, column) pair. `dcast()` on a key
+# that repeats does not fail - it aggregates with `length()` and warns, so a
+# duplicated key would turn a metric into a row count and the result would
+# still look like a matrix. Both keys are therefore checked first and a
+# duplicate aborts.
+#
+# `fill` is the value of a (label, column) pair the source has no row for. It
+# is `0` for counts and shares, where an absent row means "no report", and
+# `NA` for the signal metric, where an absent row means "not tested" and a `0`
+# would read as a null signal instead of a missing one. An `NA` fill is typed
+# from the value column so that `set()` below cannot turn a numeric metric
+# matrix into a logical one.
+.compare_matrix <- function(profile, label_col, group_col, value_col, groups,
+                            fill = 0) {
+    if (length(fill) == 1L && is.na(fill)) {
+        fill <- if (is.integer(profile[[value_col]])) NA_integer_ else NA_real_
+    }
+    if (nrow(profile)) {
+        dup <- profile[, list(.N), by = c(label_col, group_col)][N > 1L]
+        if (nrow(dup)) {
+            keys <- do.call(paste, c(utils::head(dup[, c(label_col, group_col), with = FALSE], 5L),
+                list(sep = " / ")
+            ))
+            cli::cli_abort(c(
+                "{.field {label_col}} x {.field {group_col}} is not unique in the matrix source",
+                x = "{nrow(dup)} repeated key{?s}: {.val {keys}}",
+                i = "{.fn dcast} would aggregate {.field {value_col}} into row counts instead of failing",
+                i = "This is a bug in the caller, not in the data"
+            ))
+        }
+    }
     wide <- data.table::dcast(
         profile,
         stats::as.formula(sprintf("%s ~ %s", label_col, group_col)),
-        value.var = value_col, fill = 0
+        value.var = value_col, fill = fill
     )
     for (g in groups) {
         if (!g %in% names(wide)) {
-            data.table::set(wide, j = g, value = 0)
+            data.table::set(wide, j = g, value = rep(fill, nrow(wide)))
         }
     }
     data.table::setcolorder(wide, c(label_col, groups))
@@ -228,7 +300,7 @@ utils::globalVariables(c(
     keep <- unique(keep)
     data.table::setattr(profile, "display_subset", TRUE)
     list(
-        profile = profile[get(label_col) %chin% keep],
+        profile = profile[get(label_col) %in% keep],
         label_col = label_col,
         top_n = .top_n,
         truncated = TRUE,
@@ -243,8 +315,25 @@ utils::globalVariables(c(
 #
 # `signal_results` is keyed on `.events`, not on the collapsed label, so the
 # label is rebuilt there before the signal matrix is cast.
+#
+# The comparison plan supplies the signal columns even when a comparison has
+# no results. For a display subset, the count matrix also supplies the row
+# order, and untested event/comparison cells are filled with NA.
 .compare_matrices <- function(profile, signal_results, .events, label_col,
-                              .matrix_metric, group_names) {
+                              .matrix_metric, group_names, comparison_ids,
+                              display_subset) {
+    if (label_col %in% group_names) {
+        cli::cli_abort(c(
+            "A group name in {.arg .groups} conflicts with the matrix event column {.val {label_col}}",
+            i = "Rename the group or choose another {.arg .events} column."
+        ))
+    }
+    if (label_col %in% comparison_ids) {
+        cli::cli_abort(c(
+            "A {.field comparison_id} conflicts with the matrix event column {.val {label_col}}",
+            i = "Change the group names in {.arg .groups} or choose another {.arg .events} column."
+        ))
+    }
     count <- .compare_matrix(profile, label_col, "group", "N", group_names)
     share <- .compare_matrix(profile, label_col, "group", "share", group_names)
 
@@ -259,13 +348,22 @@ utils::globalVariables(c(
         ))
     }
     sig_name <- if (is.null(.matrix_metric)) "signal" else .matrix_metric
-    signal_cols <- unique(signal_results$comparison_id)
-    signal <- if (is.na(metric) || !length(signal_cols)) {
+    signal <- if (is.na(metric)) {
         data.table::data.table()
     } else {
         sub <- .compare_add_label(data.table::copy(signal_results), .events)
-        sub[, comparison_id := factor(comparison_id, levels = signal_cols)]
-        .compare_matrix(sub, label_col, "comparison_id", metric, signal_cols)
+        if (display_subset) {
+            rows <- count[[label_col]]
+            sub <- sub[get(label_col) %in% rows]
+        }
+        wide <- .compare_matrix(
+            sub, label_col, "comparison_id", metric, comparison_ids, fill = NA
+        )
+        if (display_subset) {
+            wide <- wide[match(rows, wide[[label_col]])]
+            data.table::set(wide, j = label_col, value = rows)
+        }
+        wide
     }
 
     out <- list(count = count, share = share)
@@ -336,16 +434,24 @@ utils::globalVariables(c(
 #' `.top_n`, when set, only truncates the *display* layer (`event_profile` and
 #' `matrices`) using the rule "per group, keep the top N events by report count,
 #' then take the union across groups"; ties break on the event label so the
-#' result is deterministic. Truncated results are flagged with
-#' `attr(., "display_subset") = TRUE` and recorded in
-#' `metadata$display_subset`. `signal_results` always keeps every row so that
-#' downstream filtering sees `status` instead of missing data.
+#' result is deterministic. The matrices use the same event order, and the
+#' event profile covers the same events. When a signal metric is available,
+#' the matrix retains a column for every planned comparison and fills cells
+#' without a result with `NA`. The event profile is flagged with
+#' `attr(., "display_subset") = TRUE` and the selection is recorded in
+#' `metadata$display_subset`. `signal_results` includes every result that
+#' meets `.min_a`.
 #'
 #' @param .object A [FAERSascii] object. Must be standardized with
 #'   [faers_standardize()] and de-duplicated with [faers_dedup()].
 #' @param .groups A named list of group definitions, see [faers_group_ids()].
-#' @param ... Other arguments passed to [faers_counts()], e.g. `.field`,
-#'   `.fn` or `.na.rm`.
+#' @param ... Counting options from [faers_counts()], e.g. `.field`,
+#'   `.fn` or `.na.rm`. A supplied `.fn` runs once on the study scope's
+#'   selected field, which is read into memory on both backends. It must
+#'   return a data.table with `primaryid` and all `.events` columns, and its
+#'   report IDs must belong to the study scope. Additional arguments are passed
+#'   to `.fn`. When `.na.rm = TRUE`, rows with missing event values are omitted
+#'   from event counts. Denominators use all reports in each group or study scope.
 #' @param .split `"none"` (default) or `"joint"`; see [faers_group_ids()].
 #' @param .mode `"background"` (default) or `"pairwise"`.
 #' @param .comparisons For `.mode = "pairwise"`, a list of length-2 character
@@ -362,7 +468,10 @@ utils::globalVariables(c(
 #'   selector that narrows them. As in [faers_phv_composite()] it may be a
 #'   character vector of event values, a logical vector with one value per
 #'   candidate event, or a function applied to the event values that returns a
-#'   logical vector. Unlike [faers_phv_composite()] the selected events are
+#'   logical vector. Selectors use the sorted distinct values of the first
+#'   `.events` column, with missing values last when present. A function can
+#'   select numeric values or missing values, for example using `is.na`.
+#'   Unlike [faers_phv_composite()] the selected events are
 #'   **not** collapsed into a single composite row: each event keeps its own row
 #'   in `event_profile` and `signal_results`, which is what makes the event
 #'   spectrum and the signal matrix meaningful. The candidate count, the
@@ -385,22 +494,36 @@ utils::globalVariables(c(
 #'
 #' @return A named list of [data.table][data.table::data.table] objects:
 #' * `group_summary`: groups, report counts, share of scope, overlap removals,
-#'   definitions and the single-row combination count.
+#'   source exposure definitions and the single-row combination count. See
+#'   [faers_group_ids()] for the columns in this table.
 #' * `event_profile`: per group and event, `N` reports, the `denominator` and
 #'   the within-group `share`, plus the same quantities over the whole scope
 #'   (`universe_N`, `universe_share`). Every group is laid out over the scope's
 #'   candidate events, so absent combinations appear as `N = 0` and the table is
-#'   a complete events x groups grid that lines up with `signal_results`.
+#'   a complete events x groups grid. Its events are a superset of the ones in
+#'   `signal_results`, which `.min_a` narrows to the tested comparisons; with
+#'   `.top_n` it is the displayed grid that every matrix shares.
 #' * `comparisons`: which group was compared with which background, the group
-#'   sizes and the overlap removal counts.
+#'   sizes and the overlap removal counts. For a pair, `n_overlap_shared`
+#'   counts reports shared by the two groups before reconciliation, using the
+#'   original definition for each single-definition group and the final set
+#'   for a derived intersection or complement. `n_overlap_removed` counts the
+#'   shared reports absent from both final groups, once per report.
 #' * `signal_results`: one row per comparison x event with `a`, `b`, `c`, `d`,
 #'   the `expected` count, every metric from [phv_signal()] and a `status`
-#'   column (`"ok"`, `"zero_cell"`, `"empty_group"`).
+#'   column (`"ok"`, `"zero_cell"`, `"empty_group"`). The status is
+#'   `"empty_group"` if either side of the comparison has no reports.
 #' * `matrices`: `count`, `share` and one signal matrix (named after
 #'   `.matrix_metric`, or `signal` for the default `*_ci_low` column), each
-#'   event x group/comparison.
+#'   event x group/comparison. `count` and `share` cover the profile's events;
+#'   with a signal metric selected, the signal matrix has one column per
+#'   planned comparison and covers the events in `signal_results`. With
+#'   `.top_n`, it covers all displayed events in the same order as the count
+#'   matrix. Cells without a signal result contain `NA`.
 #' * `metadata`: scope, groups, events, comparison and denominator definitions,
-#'   versions, missing-data and truncation records.
+#'   versions, missing-data and truncation records. Overlap diagnostics count
+#'   pairs with a nonempty intersection and distinct reports shared by two or
+#'   more input definitions, before splitting or overlap handling.
 #' * `group_overlaps`: pairwise intersections of the exposure definitions.
 #'
 #' @examples
@@ -473,10 +596,26 @@ faers_compare <- function(.object,
             i = "Comparing un-deduplicated groups would bias every contingency table"
         ))
     }
-    .events_check <- .compare_check_events(.object, .events)
+    # `.field` travels to `faers_counts()` through `...`, so nothing upstream
+    # has checked it. Two things go wrong when it is left alone: `faers_get()`
+    # aborts with a bare base-R `match.arg()` error, and an `.events` column
+    # that does not exist in `.field` is only caught by `data.table` deep in
+    # the count, with a message translated by the session locale irrelevant to
+    # the user's actual mistake. Both are checked here instead.
+    dots <- list(...)
+    .field <- dots$.field %||% "reac"
+    assert_string(.field, allow_empty = FALSE)
+    fields <- FAERS_ASCII_FILE_FIELDS
+    assert_inclusive(.field, fields)
+    .events_check <- .compare_check_events(.object, .events, .field)
+    if (!".na.rm" %in% names(dots)) {
+        dots[[".na.rm"]] <- FALSE
+    }
+    na_rm <- dots[[".na.rm"]]
+    assert_bool(na_rm, arg = ".na.rm")
 
     # ---- (1) report groups ----
-    groups <- faers_group_ids(
+    groups <- .compare_build_groups(
         .object, .groups,
         .split = .split, .overlap = .overlap,
         .diagnose_combination = .diagnose_combination
@@ -489,11 +628,9 @@ faers_compare <- function(.object,
     plan <- .compare_plan(.mode, .comparisons, names(ids))
 
     # ---- (3) counts (scope counts are computed once and reused) ----
-    dots <- list(...)
-    scope_counts <- .compare_group_count(.object, scope_ids, .events, dots)
-    per_group <- lapply(ids, function(x) {
-        .compare_group_count(.object, x, .events, dots)
-    })
+    counts <- .compare_event_counts(.object, scope_ids, ids, .events, dots)
+    scope_counts <- counts$scope
+    per_group <- counts$groups
 
     # ---- (3b) optional candidate-event restriction ----
     sel <- .compare_apply_event_set(per_group, scope_counts, .event_set, .events)
@@ -512,24 +649,25 @@ faers_compare <- function(.object,
     group_summary <- groups$summary
     signal_results <- .compare_signal_results(signal, plan, ids, .events, .min_a)
     comparisons <- .compare_comparison_table(
-        plan, ids, n_scope, .overlap, groups$raw_ids
+        plan, ids, n_scope, .overlap, groups$raw_ids_by_group
     )
     event_profile <- .compare_event_profile(
         groups, per_group, scope_counts, .events, n_scope,
-        .field = dots$.field %||% "reac"
+        .field = .field
     )
     # `.top_n` truncates the display layer only; `signal_results` keeps every row.
     trunc <- .compare_truncate(event_profile, .events, .top_n)
     matrices <- .compare_matrices(
         trunc$profile, signal_results, .events, trunc$label_col,
-        .matrix_metric, names(ids)
+        .matrix_metric, names(ids), comparisons$comparison_id,
+        display_subset = trunc$truncated
     )
     metadata <- .compare_metadata(
         .object, .groups, groups, plan, .mode, .split, .overlap,
         .events, .event_set, .min_a, .methods, .phv_signal_params,
         .top_n, .matrix_metric,
-        dots$.field %||% "reac", n_scope, scope_counts, signal_results,
-        .events_check, trunc, sel
+        .field, n_scope, scope_counts, signal_results,
+        .events_check, trunc, sel, na_rm
     )
 
     list(
@@ -545,22 +683,37 @@ faers_compare <- function(.object,
 
 # ---------- validation ----------
 
-# Event columns must exist in the standardized `reac` data, as in
-# `faers_phv_scan()`. Skipped for a non-`reac` `.field`, where the caller is on
-# their own (matching `faers_counts()`'s behaviour).
+# Event columns must exist in `.field`. For `reac` the allowed set is not just
+# the physical columns: standardization joins the MedDRA hierarchy onto it, so
+# the hierarchy names are added on top of `pt`/`meddra_code`/`meddra_pt`. Every
+# other field is checked against its real columns, which is what the count
+# itself would demand anyway -- only here it fails before any work is done and
+# with a message that says which field was meant.
 .compare_check_events <- function(.object, .events, .field = "reac") {
-    if (!identical(.field, "reac")) {
-        return(list(field = .field, allowed = NA_character_))
+    # `{.field {.field}}` is not valid cli: an interpreted literal may not start
+    # with a dot, so the value is bound to a local name first.
+    fld <- .field
+    allowed <- if (identical(.field, "reac")) {
+        c(
+            "pt", "meddra_code", "meddra_pt",
+            names(faers_meddra(.object, use = "hierarchy"))
+        )
+    } else if (is.null(.object@db)) {
+        names(faers_get(.object, .field))
+    } else {
+        # `faers_get()` on a db object collects the entire table, which would
+        # read millions of rows just to learn the column names. The catalog has
+        # them for free; only the MedDRA hierarchy has to be added back by
+        # hand, because it is joined in rather than stored.
+        c(
+            DBI::dbListFields(.object@db@con, db_field_table(.field)),
+            if (field_needs_meddra(.object, .field)) db_meddra_columns(.object)
+        )
     }
-    allowed <- c(
-        "pt", "meddra_code", "meddra_pt",
-        names(faers_meddra(.object, use = "hierarchy"))
-    )
     bad <- setdiff(.events, allowed)
     if (length(bad)) {
         cli::cli_abort(c(
-            "{.arg .events} must be column{?s} of the standardized {.field reac} data",
-            x = "Unknown: {.val {bad}}",
+            "{qty(length(bad))}Unknown column{?s} of the standardized {.field {fld}} data: {.val {bad}}",
             i = "Available columns: {.val {allowed}}"
         ))
     }
@@ -600,7 +753,7 @@ faers_compare <- function(.object,
     if (!is.list(.comparisons) || !length(.comparisons)) {
         cli::cli_abort("{.arg .comparisons} must be a non-empty list of length-2 character vectors")
     }
-    lapply(seq_along(.comparisons), function(i) {
+    out <- lapply(seq_along(.comparisons), function(i) {
         pair <- .comparisons[[i]]
         if (!is.character(pair) || length(pair) != 2L || anyNA(pair)) {
             cli::cli_abort(c(
@@ -625,6 +778,26 @@ faers_compare <- function(.object,
             background_id = pair[[2L]]
         )
     })
+    # `comparison_id` is the column name of `matrices$signal` and the key
+    # `signal_results` is cast on, so two comparisons sharing one id would be
+    # cast together and their metric values silently replaced by row counts.
+    # Refuse instead of returning a matrix that looks plausible but is wrong.
+    # The same pair listed twice is the common cause; a `_vs_` inside a group
+    # name (`A_vs_B` vs `C` next to `A` vs `B_vs_C`) is the other one.
+    ids <- vapply(out, function(x) x$comparison_id, character(1L))
+    dup <- unique(ids[duplicated(ids)])
+    if (length(dup)) {
+        entries <- vapply(
+            .comparisons[ids %chin% dup], paste, character(1L), collapse = " vs "
+        )
+        cli::cli_abort(c(
+            "{.arg .comparisons} must define distinct comparisons",
+            x = "Duplicated {.field comparison_id}: {.val {dup}}",
+            i = "Colliding entries: {.val {entries}}",
+            i = "Every comparison is one column of {.field matrices$signal}, so the ids have to be unique"
+        ))
+    }
+    out
 }
 
 # ---------- contingency tables ----------
@@ -721,7 +894,7 @@ faers_compare <- function(.object,
             comparison_id = character(), mode = character(), group1 = character(),
             background_id = character(), n_total = integer()
         )
-        for (e in .events) data.table::set(out, j = e, value = character())
+        for (e in .events) data.table::set(out, j = e, value = signal[[1L]]$ct[[e]][0L])
         for (v in c("a", "b", "c", "d")) data.table::set(out, j = v, value = integer())
         for (v in sig_names) data.table::set(out, j = v, value = numeric())
         data.table::set(out, j = "status", value = character())
@@ -742,14 +915,10 @@ faers_compare <- function(.object,
 # Which group was compared against which background, with the sizes and the
 # overlap removals that produced them.
 #
-# `n_overlap_removed` is the number of reports the overlap strategy took out of
-# the two compared groups before the table was built. It is measured on the RAW
-# exposure sets, because by the time the reconciled `ids` exist the shared
-# reports are already gone from both groups (`"exclude"`) or promoted into their
-# own group (`"repartition"`). With `"keep"` nothing is removed, and a shared
-# report would be counted in both arms -- which is exactly what `"keep"` means.
+# Count a shared report as removed only if it is absent from both final arms.
+# A joint split can move reports out of a pair even with `.overlap = "keep"`.
 .compare_comparison_table <- function(plan, ids, n_scope, .overlap,
-                                      raw_ids = NULL, raw_overlap = NULL) {
+                                      raw_ids_by_group) {
     data.table::rbindlist(lapply(plan, function(cmp) {
         if (identical(cmp$mode, "background")) {
             return(data.table::data.table(
@@ -766,22 +935,23 @@ faers_compare <- function(.object,
                 strategy = .overlap
             ))
         }
-        raw_shared <- 0L
-        if (!is.null(raw_ids)) {
-            raw_shared <- length(intersect(raw_ids[[cmp$group1]], raw_ids[[cmp$group2]]))
-        }
-        removed <- if (.overlap %chin% c("exclude", "repartition")) raw_shared else 0L
+        group1_ids <- ids[[cmp$group1]]
+        group2_ids <- ids[[cmp$group2]]
+        shared <- intersect(
+            raw_ids_by_group[[cmp$group1]], raw_ids_by_group[[cmp$group2]]
+        )
+        removed <- setdiff(setdiff(shared, group1_ids), group2_ids)
         data.table::data.table(
             comparison_id = cmp$comparison_id,
             mode = cmp$mode,
             group1 = cmp$group1,
             group2 = cmp$group2,
             background_id = cmp$background_id,
-            n1 = as.integer(length(ids[[cmp$group1]])),
-            n0 = as.integer(length(ids[[cmp$group2]])),
-            n_total = as.integer(length(ids[[cmp$group1]]) + length(ids[[cmp$group2]])),
-            n_overlap_removed = as.integer(removed),
-            n_overlap_shared = as.integer(raw_shared),
+            n1 = as.integer(length(group1_ids)),
+            n0 = as.integer(length(group2_ids)),
+            n_total = as.integer(length(group1_ids) + length(group2_ids)),
+            n_overlap_removed = as.integer(length(removed)),
+            n_overlap_shared = as.integer(length(shared)),
             strategy = .overlap
         )
     }), fill = TRUE)
@@ -815,7 +985,7 @@ faers_compare <- function(.object,
         # well-formed, zero-row profile instead of a table whose columns are
         # missing for every downstream consumer.
         empty <- data.table::data.table(group = character())
-        for (e in .events) data.table::set(empty, j = e, value = character())
+        for (e in .events) data.table::set(empty, j = e, value = scope_counts[[e]][0L])
         for (v in c("N", "denominator")) data.table::set(empty, j = v, value = integer())
         for (v in c("share", "universe_N", "universe_share")) {
             data.table::set(empty, j = v, value = numeric())
@@ -850,8 +1020,28 @@ faers_compare <- function(.object,
                               .overlap, .events, .event_set, .min_a, .methods,
                               .phv_signal_params, .top_n, .matrix_metric,
                               .field, n_scope, scope_counts, signal_results,
-                              .events_check, trunc, sel) {
+                              .events_check, trunc, sel, na_rm) {
     meddra <- faers_meddra(.object, use = "hierarchy")
+    n_shared_pairs <- sum(groups$overlaps$n_intersection > 0L)
+    n_reports_shared <- 0L
+    if (n_shared_pairs > 0L) {
+        report_ids <- unlist(groups$raw_ids, use.names = FALSE)
+        n_reports_shared <- length(unique(report_ids[duplicated(report_ids)]))
+    }
+    overlap_note <- if (.split == "joint") {
+        "The joint split puts reports shared by both definitions in their own group."
+    } else {
+        switch(.overlap,
+            keep = paste(
+                "Reports remain in every group they match. Background comparisons",
+                "use the rest of the study scope. Pairwise comparisons require",
+                "disjoint groups."
+            ),
+            exclude = "Reports matching multiple definitions are removed from all groups.",
+            repartition = "Reports shared by both definitions are placed in their own group.",
+            error = "An overlapping pair aborts the run."
+        )
+    }
     list(
         call = match.call(expand.dots = FALSE),
         faers_version = as.character(utils::packageVersion("faers")),
@@ -895,33 +1085,21 @@ faers_compare <- function(.object,
         comparisons = vapply(plan, `[[`, character(1L), "comparison_id"),
         overlap_handling = list(
             strategy = .overlap,
-            n_shared_pairs = if (is.null(groups$overlaps)) 0L else nrow(groups$overlaps),
-            n_reports_shared = if (is.null(groups$overlaps)) 0L else
-                as.integer(sum(groups$overlaps$n_intersection)),
-            pairwise = .overlap %chin% c("exclude", "repartition", "error"),
-            note = switch(.overlap,
-                keep = paste(
-                    "Overlapping reports are kept in every group. In background",
-                    "mode each group still uses the same scope, so no report is",
-                    "counted twice in one table; in pairwise mode a shared report",
-                    "appears in both arms."
-                ),
-                exclude = paste(
-                    "Reports shared by two compared groups are removed from both",
-                    "before the table is built; the removed counts are reported in",
-                    "`comparisons$n_overlap_removed`."
-                ),
-                repartition = paste(
-                    "Reports shared by two compared groups are promoted into an",
-                    "extra, mutually exclusive group (`<A>&<B>`) instead of being",
-                    "dropped."
-                ),
-                error = "An overlapping pair aborts the run."
-            )
+            n_shared_pairs = n_shared_pairs,
+            n_reports_shared = n_reports_shared,
+            pairwise = .mode == "pairwise",
+            note = overlap_note
         ),
         missing = list(
-            na_rm = FALSE,
-            note = "NA event values are kept as their own row, matching faers_counts() defaults"
+            na_rm = na_rm,
+            note = if (na_rm) {
+                paste(
+                    "Rows with missing event values are excluded from event counts.",
+                    "Report denominators use all reports in each group or scope."
+                )
+            } else {
+                "NA event values are kept as their own row, matching faers_counts() defaults"
+            }
         ),
         truncation = list(
             top_n = .top_n,
@@ -929,7 +1107,15 @@ faers_compare <- function(.object,
             event_profile_applied = trunc$truncated,
             signal_results_applied = FALSE,
             rule = trunc$rule %||% NA_character_,
-            n_events_kept = trunc$n_kept %||% NA_integer_
+            n_events_kept = trunc$n_kept %||% NA_integer_,
+            note = paste(
+                "`.top_n` truncates the display layer only: `event_profile` and",
+                "the matrices cover the union of each group's top-N events.",
+                "The matrices use the same event order. When a signal metric is",
+                "available, its matrix retains all planned comparison columns",
+                "and uses NA for cells without a result. `signal_results`",
+                "includes every row that meets `.min_a`."
+            )
         ),
         display_subset = list(
             event_profile = trunc$truncated,
@@ -942,4 +1128,3 @@ faers_compare <- function(.object,
         interaction_test = "None. Joint groups are a descriptive comparison and disproportionality analysis of co-reported drugs; a formal interaction test requires its own method definition."
     )
 }
-

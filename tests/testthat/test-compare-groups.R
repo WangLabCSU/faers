@@ -149,8 +149,43 @@ test_that(".overlap handles shared reports and reports the removals", {
     )
 })
 
+test_that("intersection summaries preserve both exposure definitions", {
+    data <- compare_std_data()
+    groups <- list(
+        A = list(
+            .drugs = c("insulin", "humalog"), .logic = "or",
+            .roles = list(insulin = "PS"), .exclude_drugs = "warfarin"
+        ),
+        B = list(
+            .drugs = "metformin", .roles = list(metformin = c("PS", "SS")),
+            .drug_col = "prod_ai"
+        )
+    )
+    for (split in c("joint", "none")) {
+        result <- faers_group_ids(
+            data, groups, .split = split,
+            .overlap = if (split == "joint") "keep" else "repartition"
+        )
+        both <- if (split == "joint") "A+B" else "A&B"
+        summary <- result$summary[group == both]
+        expect_identical(summary$drugs[[1L]], c("insulin", "humalog", "metformin"))
+        expect_identical(summary$n_patterns, 3L)
+        expect_identical(summary$logic, "and")
+        expect_identical(summary$drug_col, NA_character_)
+        expect_identical(summary$roles[[1L]], lapply(groups, `[[`, ".roles"))
+        defs <- summary$source_definitions[[1L]]
+        expect_named(defs, c("A", "B"))
+        expect_identical(defs$A$.logic, "or")
+        expect_identical(defs$A$.exclude_drugs, "warfarin")
+        expect_identical(defs$A$.drug_col, "drugname")
+        expect_identical(defs$B$.drug_col, "prod_ai")
+    }
+})
+
 test_that("faers_group_ids() validates its inputs", {
     data <- compare_std_data()
+
+    expect_error(faers_group_ids(data, list(primaryid = "insulin")), "reserved name.*primaryid")
 
     # Unnamed groups.
     expect_error(

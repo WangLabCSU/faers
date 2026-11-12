@@ -34,6 +34,9 @@ utils::globalVariables(c("n_intersection"))
     if (is.null(nms) || anyNA(nms) || any(!nzchar(nms))) {
         cli::cli_abort("{.arg .groups} must be fully named, e.g. {.code list(A = \"warfarin\", B = \"metformin\")}")
     }
+    if ("primaryid" %in% nms) {
+        cli::cli_abort("{.arg .groups} cannot use the reserved name {.val primaryid}; it identifies reports in {.field membership}")
+    }
     dup <- unique(nms[duplicated(nms)])
     if (length(dup)) {
         cli::cli_abort(c(
@@ -323,6 +326,7 @@ utils::globalVariables(c("n_intersection"))
 #' @param .object A [FAERSascii] object, standardized with
 #'   [faers_standardize()]. It defines the study scope `U`.
 #' @param .groups A named list of group definitions, see *Details*.
+#'   The name `primaryid` is reserved for the report ID column.
 #' @param .split `"none"` (default) keeps the groups as given; `"joint"` splits
 #'   exactly two groups into `A-only`, `B-only`, `A+B` and `Neither`.
 #' @param .overlap `"keep"`, `"exclude"`, `"repartition"` or `"error"`, see
@@ -333,14 +337,25 @@ utils::globalVariables(c("n_intersection"))
 #'
 #' @return A named list:
 #' * `ids`: named list of sorted, unique `primaryid` character vectors.
+#' * `raw_ids`: report ID sets named by the input definitions, before
+#'   splitting or overlap handling.
 #' * `membership`: [data.table][data.table::data.table] with one row per scope
 #'   report and one logical column per group.
 #' * `summary`: [data.table][data.table::data.table] with `group`, `n_reports`,
 #'   `share_of_scope`, `n_removed_overlap`, `is_empty`, the definition columns
 #'   `drugs`, `roles`, `logic`, `exclude_drugs`, `drug_col`, `n_patterns`, and
-#'   `n_single_row_both`.
+#'   `n_single_row_both`. The `source_definitions` list column contains the
+#'   named exposure definitions used to build the group, with resolved drug
+#'   columns. For an intersection, `drugs` and `n_patterns` cover both
+#'   definitions, `roles` are keyed by source group, and `logic = "and"`
+#'   describes the intersection of the two definitions. The scalar
+#'   `drug_col` is `NA` if the definitions use different columns.
+#'   For a group derived from a single definition,
+#'   `n_removed_overlap` counts reports removed from that definition. The
+#'   intersection and `Neither` have zero removals.
 #' * `overlaps`: [data.table][data.table::data.table] with `group1`, `group2`,
 #'   `n_intersection` and `strategy`.
+#' * `scope_ids`: report IDs in the study scope.
 #'
 #' @examples
 #' data <- readRDS(system.file("extdata", "standardized_data.rds", package = "faers"))
@@ -376,6 +391,15 @@ faers_group_ids <- function(.object,
                             .diagnose_combination = TRUE) {
     .split <- match.arg(.split)
     .overlap <- match.arg(.overlap)
+    groups <- .compare_build_groups(.object, .groups, .split, .overlap,
+        .diagnose_combination
+    )
+    groups$raw_ids_by_group <- NULL
+    groups
+}
+
+.compare_build_groups <- function(.object, .groups, .split, .overlap,
+                                  .diagnose_combination) {
     assert_bool(.diagnose_combination)
     assert_s3_class(.object, "FAERSascii")
     if (!.object@standardization) {
@@ -387,66 +411,78 @@ faers_group_ids <- function(.object,
     n_scope <- length(scope_ids)
 
     # ---- (1) raw exposure sets, one per definition ----
-    raw <- lapply(defs, function(def) {
+    raw_defs <- lapply(defs, function(def) {
         as.character(.compare_group_ids(.object, def))
     })
-    names(raw) <- names(defs)
+    names(raw_defs) <- names(defs)
 
     # ---- (2) joint split, or overlap reconciliation ----
+    # Record source definitions in the same order as the resulting sets.
+    # Group names are labels and can contain the separators used in a split.
     if (identical(.split, "joint")) {
-        ids <- .compare_split_joint(raw, scope_ids)
-        # every derived group is backed by one or both source definitions
-        src <- c(
-            stats::setNames(names(defs)[[1L]], names(ids)[[1L]]),
-            stats::setNames(names(defs)[[2L]], names(ids)[[2L]]),
-            stats::setNames(paste(names(defs), collapse = "+"), names(ids)[[3L]]),
-            stats::setNames(NA_character_, names(ids)[[4L]])
-        )
+        ids <- .compare_split_joint(raw_defs, scope_ids)
+        sources <- list(1L, 2L, c(1L, 2L), integer())
     } else {
-        ids <- .compare_apply_overlap(raw, .overlap)
-        src <- stats::setNames(
-            vapply(names(ids), function(nm) {
-                hit <- names(defs)[vapply(names(defs), function(d) {
-                    identical(nm, d) || startsWith(nm, paste0(d, "&"))
-                }, logical(1L))]
-                if (length(hit)) hit[[1L]] else NA_character_
-            }, character(1L)),
-            names(ids)
-        )
+        ids <- .compare_apply_overlap(raw_defs, .overlap)
+        sources <- if (identical(.overlap, "repartition")) {
+            list(1L, 2L, c(1L, 2L))
+        } else {
+            as.list(seq_along(defs))
+        }
     }
 
-    # ---- (3) pairwise overlap diagnosis (on the raw sets) ----
-    overlaps <- .compare_overlap_table(raw, .overlap)
+    # Compare each final group to its source definition. The intersection and
+    # Neither are new sets, so their baseline is their own membership.
+    raw_ids_by_group <- stats::setNames(lapply(seq_along(ids), function(i) {
+        source <- sources[[i]]
+        if (length(source) == 1L) {
+            raw_defs[[source]]
+        } else {
+            ids[[i]]
+        }
+    }), names(ids))
+
+    # ---- (3) pairwise overlap diagnosis (on the definition-level raw sets) ----
+    overlaps <- .compare_overlap_table(raw_defs, .overlap)
 
     # ---- (4) single-row (fixed-dose) share of the joint group ----
     single_row <- 0L
     if (isTRUE(.diagnose_combination) && length(defs) == 2L) {
         single_row <- .compare_single_row_both(
-            .object, defs, intersect(raw[[1L]], raw[[2L]])
+            .object, defs, intersect(raw_defs[[1L]], raw_defs[[2L]])
         )
     }
 
     # ---- (5) summary ----
-    summary <- data.table::rbindlist(lapply(names(ids), function(nm) {
-        base <- src[[nm]]
-        def <- if (is.na(base)) NULL else defs[[if (grepl("\\+", base)) names(defs)[[1L]] else base]]
-        n <- length(ids[[nm]])
-        is_both <- !is.na(base) && grepl("\\+", base)
+    summary_defs <- lapply(defs, function(def) {
+        def$.drug_col <- .compare_group_drug_col(.object, def)
+        def[.COMPARE_GROUP_KEYS]
+    })
+    summary <- data.table::rbindlist(lapply(seq_along(ids), function(i) {
+        source <- summary_defs[sources[[i]]]
+        n <- length(ids[[i]])
+        is_both <- length(source) == 2L
+        drugs <- as.character(unlist(lapply(source, `[[`, ".drugs"), use.names = FALSE))
+        exclusions <- as.character(unlist(lapply(source, `[[`, ".exclude_drugs"), use.names = FALSE))
+        roles <- lapply(source, `[[`, ".roles")
+        if (length(roles) == 1L) {
+            roles <- roles[[1L]]
+        }
+        drug_cols <- unique(vapply(source, `[[`, character(1L), ".drug_col"))
         data.table::data.table(
-            group = nm,
+            group = names(ids)[[i]],
             n_reports = as.integer(n),
             share_of_scope = if (n_scope) n / n_scope else NA_real_,
-            n_removed_overlap = as.integer(
-                if (is.na(base)) 0L else length(raw[[if (is_both) names(defs)[[1L]] else base]]) - n
-            ),
+            n_removed_overlap = as.integer(length(raw_ids_by_group[[i]]) - n),
             is_empty = n == 0L,
-            drugs = list(if (is.null(def)) character() else def$.drugs),
-            roles = list(if (is.null(def)) list() else def$.roles),
-            logic = if (is.null(def)) NA_character_ else def$.logic,
-            exclude_drugs = list(if (is.null(def)) character() else def$.exclude_drugs),
-            drug_col = if (is.null(def)) NA_character_ else .compare_group_drug_col(.object, def),
-            n_patterns = as.integer(if (is.null(def)) 0L else length(def$.drugs)),
-            n_single_row_both = as.integer(if (is_both) single_row else 0L)
+            drugs = list(drugs),
+            roles = list(roles),
+            logic = if (is_both) "and" else if (length(source)) source[[1L]]$.logic else NA_character_,
+            exclude_drugs = list(unique(exclusions)),
+            drug_col = if (length(drug_cols) == 1L) drug_cols[[1L]] else NA_character_,
+            n_patterns = length(drugs),
+            n_single_row_both = as.integer(if (is_both) single_row else 0L),
+            source_definitions = list(source)
         )
     }))
 
@@ -458,10 +494,11 @@ faers_group_ids <- function(.object,
 
     list(
         ids = ids,
-        raw_ids = raw,
+        raw_ids = raw_defs,
         membership = membership,
         summary = summary[],
         overlaps = overlaps[],
-        scope_ids = scope_ids
+        scope_ids = scope_ids,
+        raw_ids_by_group = raw_ids_by_group
     )
 }
