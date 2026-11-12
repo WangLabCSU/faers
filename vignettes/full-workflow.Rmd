@@ -248,6 +248,116 @@ A few practical notes:
 - Use `.drug_pattern` to restrict the scan to a drug class, e.g.
   `faers_phv_scan(data, .events = "pt", .drug_pattern = "insulin|humulin")`.
 
+## Comparing several drug groups
+
+`faers_phv_signal()` compares one drug against the rest of the study scope.
+When the question involves several drugs at once, `faers_compare()` runs them
+as one orchestrated analysis so that every group shares the same universe and
+the same counting and testing code.
+
+```{r, eval = FALSE}
+# Narrow the scope FIRST: the scope is the background every group is
+# compared against, and the denominator of the shared universe.
+scope <- faers_restrict(data, .period = c("2004q1", "2004q2"))
+
+res <- faers_compare(
+    scope,
+    list(
+        insulin  = "insulin|humalog",
+        metformin = "metformin",
+        # a definition can also constrain the drug role: here only reports
+        # where the drug is the primary or secondary suspect
+        vioxx = list(.drugs = "vioxx", .roles = list(vioxx = c("PS", "SS")))
+    ),
+    .events = "pt"
+)
+
+# what each group contained, and how much the groups overlapped
+res$group_summary
+res$group_overlaps
+
+# the event spectrum: reports and within-group share per group x event
+head(res$event_profile, 10)
+
+# every comparison x event, with the full 2x2 table and the metrics
+res$signal_results[comparison_id == "insulin_vs_rest_of_scope"][order(-ror)]
+
+# events x groups count / share, plus a signal matrix per comparison
+res$matrices$count[1:5, 1:4]
+res$matrices$signal[1:5, 1:4]
+```
+
+Two comparison modes are kept strictly separate, and results identify which one
+produced them:
+
+- `"background"` (default) compares **each group against the rest of the shared
+  scope**, using one and the same universe `U` for every group, so
+  `a + b + c + d == |U|` in every table.
+- `"pairwise"` compares **two selected groups against each other**, so the
+  denominator changes with every pair (`a + b + c + d == |G1| + |G2|`). It
+  never runs implicitly: list each pair in `.comparisons`, otherwise per-pair
+  denominators would invite uncorrected multiple comparisons.
+
+```{r, eval = FALSE}
+# head-to-head, with an explicit pair list
+faers_compare(
+    scope,
+    list(insulin = "insulin|humalog", metformin = "metformin"),
+    .mode = "pairwise", .comparisons = list(c("insulin", "metformin")),
+    .overlap = "exclude", .events = "pt"
+)
+```
+
+Drug groups commonly share reports. `.overlap` says what to do about that
+before a table is built, and the number of reports involved is always reported:
+
+- `"keep"` (default) leaves the groups as they are. Background mode is still
+  safe because each table uses the whole scope; in pairwise mode a shared
+  report would appear in both arms.
+- `"exclude"` removes the shared reports from both groups and records the count
+  in `comparisons$n_overlap_removed`.
+- `"repartition"` promotes the shared reports into an extra, mutually exclusive
+  group (`<A>&<B>`).
+- `"error"` stops the run when groups overlap.
+
+`.split = "joint"` builds the mutually exclusive four-way partition of the
+scope for two drugs instead: `A-only`, `B-only`, `A+B` and `Neither`. The
+complement is taken against the *same role-restricted exposure rules* used to
+define the second drug, so a role-restricted `B` contributes only its
+role-qualified reports:
+
+```{r, eval = FALSE}
+joint <- faers_compare(
+    scope,
+    list(A = "insulin|humalog", B = "metformin"),
+    .split = "joint", .events = "pt"
+)
+joint$group_summary            # A-only / B-only / A+B / Neither, summing to |U|
+```
+
+A few practical notes:
+
+- The data must be standardized **and** de-duplicated: an un-deduplicated
+  object would bias every contingency table.
+- The statistics are not reimplemented. Each table is handed to the same
+  `phv_signal()` a single-group analysis uses, so a row of `signal_results` is
+  identical to the equivalent standalone `faers_phv_signal()` call.
+- `.min_a` defaults to `0` (no implicit threshold); rows below it are dropped
+  and the count is reported in `metadata$event_scope$n_below_min_a`.
+- `.top_n` truncates only the display layer (the event spectrum and the
+  matrices). `signal_results` always keeps every row, and a truncated display
+  is flagged via `attr(, "display_subset")` and `metadata$display_subset`.
+- `.event_set` restricts the candidate events with the same
+  character / logical / function selectors as `faers_phv_signal_composite()`,
+  but each event keeps its own row rather than being collapsed into one
+  composite row.
+- Joint groups are a **descriptive** comparison and disproportionality analysis
+  of co-reported drugs. They are not a formal interaction test; see
+  `metadata$interaction_test`.
+- On `database = "duckdb"` objects the group membership is pushed into the
+  database as a temporary table and joined in SQL, so the source database is
+  never modified and results match the in-memory path.
+
 ## sessionInfo
 ```{r}
 sessionInfo()

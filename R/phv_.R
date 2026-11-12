@@ -180,6 +180,12 @@ phv_prr <- function(a, b, c, d, alpha = 0.05) {
 #' @rdname phv_signal
 phv_chisq <- function(a, b, c, d, correct = TRUE, BPPARAM = SerialParam()) {
     assert_phv_table(a, b, c, d)
+    # Zero-length input has no test to run. Returning the full schema keeps the
+    # result bindable with a non-empty call (e.g. `phv_signal()` on an empty
+    # group), instead of `setnames()` failing on a zero-column data.table.
+    if (!length(a)) {
+        return(data.table(chisq = numeric(), pvalue = numeric()))
+    }
     out <- BiocParallel::bpmapply(
         function(n11, n10, n01, n00) {
             out <- stats::chisq.test(
@@ -202,6 +208,13 @@ phv_chisq <- function(a, b, c, d, correct = TRUE, BPPARAM = SerialParam()) {
 #' @rdname phv_signal
 phv_fisher <- function(a, b, c, d, alpha = 0.05, BPPARAM = SerialParam()) {
     assert_phv_table(a, b, c, d)
+    # See `phv_chisq()`: keep the schema so a zero-length call stays bindable.
+    if (!length(a)) {
+        return(data.table(
+            odds_ratio = numeric(), ci_low = numeric(),
+            ci_high = numeric(), pvalue = numeric()
+        ))
+    }
     out <- BiocParallel::bpmapply(
         function(n11, n10, n01, n00) {
             out <- stats::fisher.test(
@@ -288,6 +301,11 @@ phv_bcpnn_mcmc <- function(a, b, c, d, alpha = 0.05, n_mcmc = 1e5L, BPPARAM = Se
         gamma11 * (gamma11 + gamma10 + gamma01 + gamma00) /
             ((gamma11 + gamma10) * (gamma11 + gamma01))
     )
+    if (!length(a)) {
+        # `ic` is computed above and is already zero-length; the MCMC loop has
+        # nothing to sample, so return the schema directly (see `phv_chisq()`).
+        return(data.table(ic = ic, ci_low = numeric(), ci_high = numeric()))
+    }
     out <- BiocParallel::bpmapply(
         function(g11, g10, g01, g00) {
             # sample from the posterior distribution

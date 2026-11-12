@@ -1,3 +1,61 @@
+# faers 1.5.7
+
+* Added `faers_compare()`, a multi-group comparison entry point that runs one
+  orchestrated analysis over several drug exposure definitions in a single
+  study scope. It returns the group summary, the per-group event spectrum, the
+  comparisons actually performed, the full contingency table and signal
+  metrics for every comparison x event, event x group count/share/signal
+  matrices, the group overlaps and the run metadata. Two modes are kept
+  strictly separate and identified in the results: `"background"` compares
+  each group against the rest of the shared scope (`a + b + c + d == |U|`, the
+  same universe for every group), while `"pairwise"` compares two selected
+  groups against each other (`a + b + c + d == |G1| + |G2|`, a denominator
+  that changes per pair). `"pairwise"` never runs implicitly: every pair must
+  be listed in `.comparisons`, because per-pair denominators invite
+  uncorrected multiple comparisons. `"joint"` splitting derives the mutually
+  exclusive `A-only` / `B-only` / `A+B` / `Neither` report groups, complementing
+  B against the same role-restricted exposure rules used to define B. The
+  statistics are not reimplemented: each table is handed to the same
+  `phv_signal()` a single-group analysis uses, so a group x event row is
+  byte-identical to the equivalent standalone `faers_phv_signal()` call.
+  Difficulty-of-use safeguards are explicit: `.mode = "pairwise"` with an
+  overlapping pair refuses to build a table unless the overlap is reconciled
+  with `.overlap`, `.min_a` is `0` by default (no implicit threshold) and the
+  number of dropped rows is reported, and `.top_n` truncates only the display
+  layer (event spectrum and matrices) while `signal_results` keeps every row
+  and the truncation is flagged as `display_subset` in the attributes and the
+  metadata. Joint-group output is a descriptive comparison and
+  disproportionality analysis of co-reported drugs, **not** a formal
+  interaction test.
+
+* Added `faers_group_ids()`, the report-set layer behind `faers_compare()`:
+  it builds one `primaryid` set per named drug exposure definition on top of
+  `faers_reports_with()`, reports every pairwise intersection (and the strategy
+  applied to it), builds the mutually exclusive joint groups, and returns a
+  report x group membership matrix. `.min_a`-style filtering, statistics and
+  display concerns stay out of this layer.
+
+* Fixed `faers_counts()` on duckdb-backed objects for the `reac` event columns
+  that live in the field itself (`pt`, `meddra_code`, `meddra_pt`): the SQL
+  builder qualified every event column with the MedDRA hierarchy alias, so
+  `.events = "pt"` failed with a binder error. Only the columns actually added
+  by the hierarchy join (`soc_name`, `pt_name`, ...) are now qualified, which
+  also makes the duckdb count for `pt`/`meddra_code`/`meddra_pt` identical to
+  the in-memory path. The same fix applies to the counting path used by
+  `faers_compare()`.
+
+* Fixed `phv_chisq()`, `phv_fisher()` and `phv_bcpnn_mcmc()` on zero-length
+  input: they built their result from a list of per-row results and then named
+  the columns unconditionally, so a zero-length call aborted with
+  `无法将 N 个名字赋值给一个包含 0 列的 data.table`. This was reachable
+  through the public API, e.g.
+  `faers_phv_signal(faers_keep(obj, character()), .events = "pt", .full = obj,
+  .methods = "chisq")`. They now return their full schema with zero rows, which
+  keeps the result bindable with a populated one and gives `phv_signal()` a
+  single source of truth for the metric columns. As a consequence an empty
+  selection in `faers_compare()` now returns the same `signal_results` columns
+  as a populated one, so an explicit `.matrix_metric` no longer fails there.
+
 # faers 1.5.6
 
 * Added `faers_reports_with()`, a report set constructor for drug exposure

@@ -58,3 +58,57 @@ testthat::test_that("`faers_phv_signal()` works well", {
     ))
     testthat::expect_true(data.table::fsetequal(signal, signal2))
 })
+
+# Regression: the vectorized methods that build their result from a list of
+# per-row results (`chisq`, `fisher`, `bcpnn_mcmc`) used to fail on zero-length
+# input, because `transpose()`/`rbind()` of an empty list yields a zero-column
+# data.table and the following `setnames()` then had nothing to name. They now
+# return their full schema, so a zero-length call stays bindable and keeps the
+# same columns as a populated one.
+testthat::test_that("phv_* methods keep their schema on zero-length input", {
+    empty <- list(a = numeric(), b = numeric(), c = numeric(), d = numeric())
+    methods <- c("ror", "prr", "chisq", "fisher", "bcpnn_norm", "obsexp_shrink", "ebgm")
+    populated <- suppressWarnings(suppressMessages(do.call(
+        phv_signal,
+        c(list(a = c(5, 10, 3), b = c(2, 3, 0), c = c(1, 2, 4), d = c(100, 200, 50)),
+            list(methods = methods))
+    )))
+    zero <- suppressWarnings(suppressMessages(do.call(
+        phv_signal, c(empty, list(methods = methods))
+    )))
+    testthat::expect_identical(nrow(zero), 0L)
+    testthat::expect_identical(names(zero), names(populated))
+    testthat::expect_identical(
+        vapply(zero, function(x) class(x)[[1L]], character(1L)),
+        vapply(populated, function(x) class(x)[[1L]], character(1L))
+    )
+
+    # `chisq`/`fisher`/`bcpnn_mcmc` are the ones that regressed; assert them
+    # individually so a future rewrite cannot silently drop a companion column
+    # (e.g. `chisq` without `chisq_pvalue`).
+    testthat::expect_identical(
+        names(suppressWarnings(phv_chisq(numeric(), numeric(), numeric(), numeric()))),
+        c("chisq", "pvalue")
+    )
+    testthat::expect_identical(
+        names(suppressWarnings(phv_fisher(numeric(), numeric(), numeric(), numeric()))),
+        c("odds_ratio", "ci_low", "ci_high", "pvalue")
+    )
+    testthat::expect_identical(
+        names(suppressWarnings(
+            phv_bcpnn_mcmc(numeric(), numeric(), numeric(), numeric(), n_mcmc = 100L)
+        )),
+        c("ic", "ci_low", "ci_high")
+    )
+
+    # MCMC-free methods are also callable with nothing to compute.
+    testthat::expect_identical(nrow(phv_ror(numeric(), numeric(), numeric(), numeric())), 0L)
+    testthat::expect_identical(nrow(phv_prr(numeric(), numeric(), numeric(), numeric())), 0L)
+    testthat::expect_identical(nrow(phv_bcpnn_norm(numeric(), numeric(), numeric(), numeric())), 0L)
+
+    # The companion issue: a non-empty call must still fail on malformed input,
+    # so the guard cannot have swallowed the validation.
+    testthat::expect_error(phv_chisq(-1, 1, 1, 1), "non-negative")
+    testthat::expect_error(phv_fisher(1, 1, 1, 1:2), "same length")
+    testthat::expect_error(phv_bcpnn_mcmc(1, 1, NA_real_, 1), "non-negative")
+})

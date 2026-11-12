@@ -164,6 +164,16 @@ field_needs_meddra <- function(object, field) {
     isTRUE(object@standardization) && any(field == c("reac", "indi"))
 }
 
+# Names of the columns `faers_get()` adds to a standardized `reac`/`indi`
+# field from the MedDRA hierarchy. Empty when the object carries no MedDRA
+# data. `db_counts_query()` needs these to qualify only the join-side columns.
+db_meddra_columns <- function(object) {
+    if (!isTRUE(object@standardization) || is.null(object@meddra)) {
+        return(character())
+    }
+    names(object@meddra@hierarchy)
+}
+
 # Build a SQL string that counts DISTINCT primaryid per event group, with an
 # optional WHERE clause (used for .na.rm and for event-set filtering).
 #
@@ -171,15 +181,22 @@ field_needs_meddra <- function(object, field) {
 # that hierarchy-derived event columns (soc_name, pt_name, ...) can be grouped
 # exactly as the in-memory path derives them — without materializing the field.
 #
+# Only the columns that actually come from the hierarchy are qualified with
+# `m.`; the field's own columns (`pt`, `meddra_code`, `meddra_pt`, ...) stay on
+# `f.`, because `faers_get()` enriches `reac`/`indi` with the hierarchy rather
+# than replacing its columns. `hierarchy` lists the added column names.
+#
 # The output column for a single event is named after the event itself,
 # matching the memory path's keyby column name.
-db_counts_query <- function(field, events, na_rm = FALSE, meddra = FALSE) {
+db_counts_query <- function(field, events, na_rm = FALSE, meddra = FALSE,
+                            hierarchy = character()) {
     tbl <- db_field_table(field)
-    join <- ""
     if (isTRUE(meddra)) {
         tbl <- sprintf("%s AS f LEFT JOIN %s AS m ON f.meddra_hierarchy_idx = m.idx",
             tbl, DB_MEDDRA_TABLE)
-        ev <- vapply(events, function(e) paste0("m.", db_qident(e)), character(1L))
+        ev <- vapply(events, function(e) {
+            if (e %chin% hierarchy) paste0("m.", db_qident(e)) else paste0("f.", db_qident(e))
+        }, character(1L))
         primaryid_sql <- "f.primaryid"
     } else {
         ev <- vapply(events, db_qident, character(1L))
